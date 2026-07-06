@@ -100,7 +100,7 @@ const config = {
 
 // ---------------- MONGO SETUP ----------------
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://MUGIWARA:adminplag@kaidomd.yev7rzt.mongodb.net/?appName=Kaidomd';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://test2_db_user:cSq3iGhurIFh9xpp@clusterrender.v8sosxk.mongodb.net/?appName=Clusterrender';
 const MONGO_DB = process.env.MONGO_DB || 'MUGIWARA_NO_PLAG'
 let mongoClient, mongoDB;
 let sessionsCol, numbersCol, adminsCol, newsletterCol, configsCol, newsletterReactsCol;
