@@ -16,10 +16,21 @@ const {
 module.exports = {
   name: 'setcmd',
   alias: ['setsticker', 'setreact', 'stickercmd', 'reactcmd', 'delcmd', 'delreact', 'listcmd', 'cmdlist'],
-  category: 'tools',
+  category: 'owner',
   description: 'Associe un sticker OU une réaction emoji à une commande (ex: .setcmd save, ✅ ou en répondant à un sticker)',
   usage: '.setcmd <commande>, <emoji> | .setcmd <commande> (en répondant à un sticker) | .delcmd | .listcmd',
-  async execute({ socket, msg, from, sender, senderNumber, args, command, prefix, quotedMsg }) {
+  async execute({ socket, msg, from, sender, senderNumber, args, command, prefix, quotedMsg, config, isOwner }) {
+    // ── VÉRIFICATION DES PERMISSIONS : Réservé exclusivement au propriétaire du bot ──
+    const botNum = String(socket.user?.id || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
+    const ownerNum = String(config?.OWNER_NUMBER || '').replace(/[^0-9]/g, '');
+    const isBotOwner = senderNumber === botNum || senderNumber === ownerNum || msg.key.fromMe || isOwner;
+
+    if (!isBotOwner) {
+      return await socket.sendMessage(from, {
+        text: '⛔ *Cette commande est strictement réservée au propriétaire du bot.*'
+      }, { quoted: msg });
+    }
+
     const quoted = quotedMsg 
       || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
       || msg.message?.stickerMessage?.contextInfo?.quotedMessage;
@@ -120,77 +131,54 @@ module.exports = {
         return await socket.sendMessage(from, { text: '❌ Impossible d\'extraire l\'identifiant de ce sticker.' }, { quoted: msg });
       }
 
-      await setStickerCommand(hash, targetCmd, senderNumber, from);
+      await setStickerCommand(hash, targetCmd, senderNumber, botNum);
 
       return await socket.sendMessage(from, {
-        text: `╭───「 🎨 *STICKER COMMANDE ACTIVÉ* 」───
-│ 🎯 *Commande liée :* \`${prefix}${targetCmd}\`
-│ 🔑 *Hash :* \`${hash.substring(0, 16)}...\`
-│ 👤 *Configuré par :* @${senderNumber}
-╰─────────────────────────☉
-
-🎉 *Envoyez ce sticker dans n'importe quel chat pour déclencher .${targetCmd} !*`,
-        mentions: [sender]
+        text: `✅ *Sticker lié avec succès !*\n\n🎯 *Action :* Chaque fois que ce sticker sera envoyé, la commande \`${prefix}${targetCmd}\` sera exécutée.`
       }, { quoted: msg });
     }
 
-    // SCÉNARIO B : Association par RÉACTION EMOJI (.setcmd save, ✅ ou .setcmd save ✅)
-    let targetEmoji = null;
-    let targetCommand = null;
+    // SCÉNARIO B : Association par RÉACTION EMOJI (ex: .setcmd save, ✅ ou .setcmd save ✅ ou .setreact save , ❤️)
+    if (rawArgs.includes(',') || rawArgs.split(/\s+/).length >= 2 || isEmoji(rawArgs)) {
+      let cmdPart = '';
+      let emojiPart = '';
 
-    if (rawArgs.includes(',')) {
-      const parts = rawArgs.split(',').map(s => s.trim());
-      if (isEmoji(parts[1])) {
-        targetCommand = parts[0];
-        targetEmoji = parts[1];
-      } else if (isEmoji(parts[0])) {
-        targetCommand = parts[1];
-        targetEmoji = parts[0];
-      }
-    } else if (args.length >= 2) {
-      // Recherche de l'emoji parmi les arguments
-      for (let i = 0; i < args.length; i++) {
-        if (isEmoji(args[i])) {
-          targetEmoji = args[i];
-          targetCommand = args.filter((_, idx) => idx !== i).join(' ');
-          break;
+      if (rawArgs.includes(',')) {
+        const parts = rawArgs.split(',');
+        cmdPart = parts[0].replace(/^[./!#]/, '').trim();
+        emojiPart = parts.slice(1).join(',').trim();
+      } else {
+        const tokens = rawArgs.split(/\s+/);
+        // Si le dernier token est un emoji
+        if (isEmoji(tokens[tokens.length - 1])) {
+          emojiPart = tokens[tokens.length - 1];
+          cmdPart = tokens.slice(0, tokens.length - 1).join(' ').replace(/^[./!#]/, '').trim();
+        } else if (isEmoji(tokens[0])) {
+          emojiPart = tokens[0];
+          cmdPart = tokens.slice(1).join(' ').replace(/^[./!#]/, '').trim();
         }
       }
+
+      if (cmdPart && emojiPart && isEmoji(emojiPart)) {
+        await setReactionCommand(emojiPart, cmdPart, senderNumber, botNum);
+
+        return await socket.sendMessage(from, {
+          text: `✨ *Réaction Emoji liée avec succès !*\n\n🔮 *Emoji :* ${emojiPart}\n🎯 *Commande cible :* \`${prefix}${cmdPart}\`\n\n💡 *Fonctionnement :* Réagissez avec ${emojiPart} à n'importe quel message (texte, photo, vidéo, statut, vue unique) pour déclencher automatiquement \`${prefix}${cmdPart}\` sur ce message !`
+        }, { quoted: msg });
+      }
     }
 
-    if (targetEmoji && targetCommand) {
-      targetCommand = targetCommand.replace(/^[./!#]/, '').trim();
-      await setReactionCommand(targetEmoji, targetCommand, senderNumber, from);
-
-      return await socket.sendMessage(from, {
-        text: `╭───「 ✨ *RÉACTION COMMANDE ACTIVÉE* 」───
-│ 🔘 *Emoji Réaction :* ${targetEmoji}
-│ 🎯 *Commande liée :* \`${prefix}${targetCommand}\`
-│ 👤 *Configuré par :* @${senderNumber}
-╰─────────────────────────☉
-
-🎉 *C'est magique !* Réagissez désormais à *n'importe quel message* avec ${targetEmoji} pour exécuter automatiquement la commande \`${prefix}${targetCommand}\` en réponse à ce message !`,
-        mentions: [sender]
-      }, { quoted: msg });
-    }
-
-    // Guide d'aide si arguments invalides
+    // Si aucune syntaxe valide n'a été détectée
     return await socket.sendMessage(from, {
-      text: `╭───「 💡 *GUIDE D'UTILISATION SETCMD* 」───
-│
-│ 1️⃣ *Associer une Réaction Emoji :*
-│    \`${prefix}setcmd save, ✅\`
-│    \`${prefix}setcmd tourl, 📤\`
-│    \`${prefix}setcmd s, 🎨\`
-│    \`${prefix}setcmd tr en, 🌐\`
-│
-│ 2️⃣ *Associer un Sticker :*
-│    Répondez à un sticker avec \`${prefix}setcmd ping\`
-│
-│ 3️⃣ *Consulter la liste :*
-│    \`${prefix}listcmd\`
-│
-╰─────────────────────────☉`
+      text: `💡 *Guide d'utilisation de .setcmd :*\n\n` +
+            `1️⃣ *Lier un Emoji à une commande :*\n` +
+            `• \`${prefix}setcmd save, ✅\` (Réagir avec ✅ déballe et enregistre le média)\n` +
+            `• \`${prefix}setcmd ping, ⚡\`\n\n` +
+            `2️⃣ *Lier un Sticker à une commande :*\n` +
+            `• Répondez à un sticker avec \`${prefix}setcmd <nom_commande>\`\n\n` +
+            `3️⃣ *Gérer les alias existants :*\n` +
+            `• \`${prefix}listcmd\` : Voir tous les alias enregistrés\n` +
+            `• \`${prefix}delcmd <emoji|nom>\` : Supprimer un alias`
     }, { quoted: msg });
   }
 };

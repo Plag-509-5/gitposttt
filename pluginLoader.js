@@ -204,14 +204,16 @@ async function executePlugin(commandName, context) {
   }
 
   // Extract quoted message context if available across message types
-  const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
+  const resolvedQuotedMsg = context.quotedMsg
+    || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
     || msg.message?.stickerMessage?.contextInfo?.quotedMessage
     || msg.message?.imageMessage?.contextInfo?.quotedMessage
     || msg.message?.videoMessage?.contextInfo?.quotedMessage
     || msg.quoted?.msg
     || null;
 
-  const quotedSender = msg.message?.extendedTextMessage?.contextInfo?.participant
+  const resolvedQuotedSender = context.quotedSender
+    || msg.message?.extendedTextMessage?.contextInfo?.participant
     || msg.message?.stickerMessage?.contextInfo?.participant
     || msg.message?.imageMessage?.contextInfo?.participant
     || msg.quoted?.sender
@@ -221,13 +223,14 @@ async function executePlugin(commandName, context) {
   try {
     await plugin.execute({
       ...context,
-      quoted: quotedMsg,
-      quotedMsg,
-      quotedSender,
+      quoted: resolvedQuotedMsg,
+      quotedMsg: resolvedQuotedMsg,
+      quotedSender: resolvedQuotedSender,
       plugin,
       plugins: pluginsMap,
       getPluginsByCategory,
-      getAllPluginsList
+      getAllPluginsList,
+      getPlugin: (name) => pluginsMap.get(name)
     });
     return true;
   } catch (err) {

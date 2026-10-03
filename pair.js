@@ -515,12 +515,20 @@ function isSessionActive(number) {
 
 const otpStore = new Map();
 // ============================================================
-// ANTIDELETE STORE — Store en mémoire par session
+// MESSAGE STORE & RETRY CACHE — Résolution "En attente de ce message"
 // ============================================================
+const NodeCache = require('node-cache');
 const messageStores = new Map(); // sessionNumber → Map<msgId, msgObject>
+const sessionRetryCaches = new Map(); // sessionNumber → NodeCache
 
-const STORE_MAX_PER_SESSION = 500;  // quota max par session
-const STORE_CLEAN_INTERVAL  = 20 * 60 * 1000; // nettoyage toutes les 20 min
+const STORE_MAX_PER_SESSION = 5000; // Capacité max de 5000 messages par session
+
+function getSessionRetryCache(sessionNumber) {
+  if (!sessionRetryCaches.has(sessionNumber)) {
+    sessionRetryCaches.set(sessionNumber, new NodeCache({ stdTTL: 3600, checkperiod: 120 }));
+  }
+  return sessionRetryCaches.get(sessionNumber);
+}
 
 function getSessionStore(sessionNumber) {
   if (!messageStores.has(sessionNumber)) {
@@ -533,9 +541,9 @@ function storeMessage(sessionNumber, msg) {
   if (!msg?.key?.id || !msg?.message) return;
   const store = getSessionStore(sessionNumber);
 
-  // Quota dépassé → vider les 100 plus anciens
+  // Éviction progressive FIFO des 200 plus anciens lorsque le quota est atteint
   if (store.size >= STORE_MAX_PER_SESSION) {
-    const keys = [...store.keys()].slice(0, 100);
+    const keys = [...store.keys()].slice(0, 200);
     keys.forEach(k => store.delete(k));
   }
 
@@ -545,14 +553,6 @@ function storeMessage(sessionNumber, msg) {
 function getStoredMessage(sessionNumber, msgId) {
   return getSessionStore(sessionNumber).get(msgId) || null;
 }
-
-// Nettoyage automatique toutes les 20 min
-setInterval(() => {
-  for (const [sessionNumber, store] of messageStores.entries()) {
-    store.clear();
-    console.log(`[ANTIDELETE] Store nettoyé pour session ${sessionNumber}`);
-  }
-}, STORE_CLEAN_INTERVAL);
 
 // ---------------- helpers kept/adapted ----------------
 
@@ -767,6 +767,14 @@ async function registerGroupParticipantListener(socket) {
 
 async function setupStatusHandlers(socket, sanitizedNumber) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
+    if (messages && messages.length) {
+      for (const m of messages) {
+        if (m?.key?.id && m?.message) {
+          storeMessage(sanitizedNumber, m);
+        }
+      }
+    }
+
     const message = messages[0];
     if (!message?.key || message.key.remoteJid !== 'status@broadcast' || !message.key.participant) return;
 
@@ -1176,13 +1184,14 @@ function handleGroupStatusMention(socket, sessionId) {
 // ---------------- command handlers ----------------
 function setupCommandHandlers(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
-    const msg = messages[0];
-    // ── STORE tous les messages pour antidelete ──
-  for (const m of messages) {
-    if (m?.key?.id && m?.message && !m.key.fromMe) {
-      storeMessage(number, m);
+    // ── STORE tous les messages (reçus, envoyés, groupes, statuts, privés) pour antidelete, save & retry ──
+    for (const m of messages) {
+      if (m?.key?.id && m?.message) {
+        storeMessage(number, m);
+      }
     }
-  }
+
+    const msg = messages[0];
     
     // 1. Vérifications de base
     if (!msg || !msg.message) return;
@@ -1236,7 +1245,7 @@ function setupCommandHandlers(socket, number) {
             id: msg.key.id || `REACT_CMD_${Date.now()}`,
             participant: reactorJid
           },
-          message: {
+          message: targetMsg?.message ? targetMsg.message : {
             extendedTextMessage: {
               text: fullBody,
               contextInfo: {
@@ -1261,19 +1270,20 @@ function setupCommandHandlers(socket, number) {
           from: targetChat,
           sender: reactorJid,
           senderNumber: reactorNumber,
-          args: cmdArgs,
-          body: fullBody,
           isOwner: isReactorOwner,
+          args: cmdArgs,
+          fullArgs: cmdArgs.join(' '),
+          command: cmdName,
+          prefix: cmdPrefix,
           config,
           sessionCfg,
-          prefix: cmdPrefix,
-          command: cmdName,
-          quoted: quotedPayload,
-          quotedMsg: quotedPayload,
-          quotedSender: quotedParticipant,
           activeSockets,
-          loadUserConfigFromMongo,
-          setUserConfigInMongo
+          quotedMsg: quotedPayload,
+          contextInfo: {
+            stanzaId: targetMsgId,
+            participant: quotedParticipant,
+            quotedMessage: quotedPayload
+          }
         });
 
         if (isHandled) return;
@@ -1535,7 +1545,7 @@ function setupCommandHandlers(socket, number) {
       case 'post':
 case 'status': {
   try {
-    const { downloadContentFromMessage } = require('@rexxhayanasi/elaina-baileys');
+    const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
     // 1. Vérifier si on répond à un message (quoted)
     const quotedMsg = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
@@ -2687,7 +2697,7 @@ case 'mod': {
       prepareWAMessageMedia,
       generateWAMessageFromContent,
       proto
-    } = require('@rexxhayanasi/elaina-baileys');
+    } = require('@whiskeysockets/baileys');
 
     // ── Appel API Aptoide ──
     const { data } = await axios.get(
@@ -2863,7 +2873,7 @@ case 'silent': {
             const coverUrl = movie.cover?.url || 'https://i.ibb.co/99KrSHn2/c4cd381ffed6.jpg';
 
             // Préparer le média pour l'image
-            const { generateWAMessageContent, generateWAMessageFromContent, proto } = require('@rexxhayanasi/elaina-baileys');
+            const { generateWAMessageContent, generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
             
             const media = await generateWAMessageContent({
                 image: { url: coverUrl }
@@ -2911,7 +2921,7 @@ case 'silent': {
         }
 
         // Créer le message interactif avec carousel
-        const { generateWAMessageFromContent, proto } = require('@rexxhayanasi/elaina-baileys');
+        const { generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
         
         const interactiveMessage = {
             body: { text: `🎥 *Résultats pour :* ${query}\n\nGlisse pour choisir ! ➡️` },
@@ -2973,7 +2983,7 @@ case 'smsubs': {
 
         const sections = [{ title: "Langues disponibles", rows: rows }];
 
-        const { generateWAMessageFromContent, proto } = require('@rexxhayanasi/elaina-baileys');
+        const { generateWAMessageFromContent, proto } = require('@whiskeysockets/baileys');
         
         const interactiveMsg = generateWAMessageFromContent(jid, {
             viewOnceMessage: {
@@ -5311,7 +5321,7 @@ case 'setpp': {
       if (typeof downloadMediaMessage === 'function') {
         try { return await downloadMediaMessage(src, type); } catch (_) {}
       }
-      const { downloadContentFromMessage } = require('@rexxhayanasi/elaina-bail');
+      const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
       const stream = await downloadContentFromMessage(src, type);
       const chunks = [];
       for await (const chunk of stream) chunks.push(chunk);
@@ -5807,7 +5817,7 @@ case 'unadmin': {
         if (quoted) {
             // Fonction pour télécharger avec la bonne méthode
             async function downloadMedia(mediaMessage) {
-                const { downloadContentFromMessage } = require('@rexxhayanasi/elaina-baileys');
+                const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
                 
                 let stream;
                 if (mediaMessage.imageMessage) {
@@ -8429,7 +8439,7 @@ ${footer}
 case 'swgc': {
   try {
     const crypto = require('crypto');
-    const { generateWAMessageContent, generateWAMessageFromContent, downloadContentFromMessage } = require('@rexxhayanasi/elaina-baileys');
+    const { generateWAMessageContent, generateWAMessageFromContent, downloadContentFromMessage } = require('@whiskeysockets/baileys');
 
     async function groupStatus(client, jid, content) {
       const inside = await generateWAMessageContent(content, {
@@ -9938,7 +9948,7 @@ case 'deladmin': {
         let buffer;
         
         // Méthode 1: Utiliser downloadContentFromMessage (méthode Baileys officielle)
-        const { downloadContentFromMessage } = require('@rexxhayanasi/elaina-baileys');
+        const { downloadContentFromMessage } = require('@whiskeysockets/baileys');
         
         if (quoted.audioMessage) {
             const stream = await downloadContentFromMessage(quoted.audioMessage, 'audio');
@@ -10420,11 +10430,28 @@ async function EmpirePair(number, res) {
   const logger = pino({ level: process.env.NODE_ENV === 'production' ? 'fatal' : 'debug' });
 
  try {
+    const msgRetryCounterCache = getSessionRetryCache(sanitizedNumber);
     const socket = makeWASocket({
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
       printQRInTerminal: false,
       logger,
-      browser: ["Ubuntu", "Chrome", "20.0.04"]
+      browser: ["Ubuntu", "Chrome", "20.0.04"],
+      msgRetryCounterCache,
+      syncFullHistory: false,
+      markOnlineOnConnect: true,
+      generateHighQualityLinkPreview: true,
+      getMessage: async (key) => {
+        try {
+          const store = getSessionStore(sanitizedNumber);
+          const msgObj = store.get(key?.id);
+          if (msgObj && msgObj.message) {
+            return msgObj.message;
+          }
+        } catch (e) {
+          console.warn(`[GETMESSAGE] Key ${key?.id} lookup failed:`, e?.message || e);
+        }
+        return { conversation: 'KAIDO-MD Sync' };
+      }
     });
 
     // Après avoir créé le socket et défini socketCreationTime
