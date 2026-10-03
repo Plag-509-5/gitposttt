@@ -2,7 +2,7 @@
 // CommonJS - gère .setreact <emoji> : sauvegarde emoji en config utilisateur et forward du média cité
 // Aucun message de succès envoyé (sauf erreur). Exporte handleSetReact.
 
-const { jidNormalizedUser } = require('baileys'); // adapte si tu utilises un autre wrapper
+const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 const { loadUserConfigFromMongo, setUserConfigInMongo } = require('./pair.js'); // adapte le chemin
 
 /**

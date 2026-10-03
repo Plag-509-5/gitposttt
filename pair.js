@@ -13,8 +13,10 @@ const axios = require('axios');
 const FileType = require('file-type');
 const fetch = require('node-fetch');
 const { MongoClient } = require('mongodb');
-const { loadPlugins } = require('./pluginLoader');
-const plugins = loadPlugins();
+const { loadPlugins, executePlugin, getPluginsByCategory, getAllPluginsList } = require('./pluginLoader');
+loadPlugins();
+const { findStickerCommand, initStickerDb } = require('./files/sticker_cmd');
+const { findReactionCommand, initReactionDb } = require('./files/reaction_cmd');
 const { sms, downloadMediaMessage } = require('./msg')
 const { startTicTacToe, handleTicTacToeMove, deleteGame } = require('./files/tictactoe');
 const { setupTranslationWrapper, saveSessionLanguage } = require('./files/translation');
@@ -49,7 +51,7 @@ const {
   downloadContentFromMessage,
   DisconnectReason
 } = require('@whiskeysockets/baileys');
-const { jidNormalizedUser } = require('baileys')
+const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 // Au début de ton fichier, après les imports
 if (!global.scheduledRestart) {
     global.scheduledRestart = null;
@@ -125,6 +127,8 @@ async function initMongo() {
   await newsletterCol.createIndex({ jid: 1 }, { unique: true });
   await newsletterReactsCol.createIndex({ jid: 1 }, { unique: true });
   await configsCol.createIndex({ number: 1 }, { unique: true });
+  await initStickerDb(mongoDB).catch(() => {});
+  await initReactionDb(mongoDB).catch(() => {});
   console.log('✅ Mongo initialized and collections ready');
 }
 
@@ -1184,9 +1188,93 @@ function setupCommandHandlers(socket, number) {
     
     // Gérer les messages éphémères
     msg.message = (type === 'ephemeralMessage') ? msg.message.ephemeralMessage.message : msg.message;
+
+    // ── INTERCEPTION DES RÉACTIONS EMOJIS ASSOCIÉES À DES COMMANDES (.setcmd <cmd>, <emoji>) ──
+    const reactionMsg = (type === 'reactionMessage') ? msg.message.reactionMessage : msg.message?.reactionMessage;
+    if (reactionMsg && reactionMsg.text) {
+      const emojiReact = reactionMsg.text;
+      const matchedReactCmd = findReactionCommand(emojiReact);
+      if (matchedReactCmd && matchedReactCmd.command) {
+        const targetKey = reactionMsg.key;
+        const targetMsgId = targetKey?.id;
+        const targetChat = targetKey?.remoteJid || remoteJid;
+        const targetMsg = getStoredMessage(number, targetMsgId);
+
+        const reactorJid = msg.key.fromMe 
+          ? (socket.user?.id ? (socket.user.id.split(':')[0] + '@s.whatsapp.net') : msg.key.remoteJid)
+          : (msg.key.participant || msg.key.remoteJid);
+        const reactorNumber = (reactorJid || '').split('@')[0];
+        const isReactorOwner = reactorNumber === config.OWNER_NUMBER.replace(/[^0-9]/g, '');
+
+        // Vérifier le mode privé si configuré
+        const sanitizedBot = String(socket.user?.id || '').replace(/[^0-9]/g, '');
+        const sessionCfg = await loadSessionConfigMerged(number || sanitizedBot);
+        if (sessionCfg && sessionCfg.MODE === 'private' && !isReactorOwner && reactorNumber !== sanitizedBot) {
+          return;
+        }
+
+        const cmdPrefix = config.PREFIX || '.';
+        const fullCmdStr = matchedReactCmd.command;
+        const fullBody = `${cmdPrefix}${fullCmdStr}`;
+        const cmdName = fullCmdStr.split(' ')[0].toLowerCase();
+        const cmdArgs = fullCmdStr.split(' ').slice(1);
+
+        const quotedPayload = targetMsg?.message || null;
+        const quotedParticipant = targetMsg?.key?.participant || targetKey?.participant || targetKey?.remoteJid;
+
+        const syntheticMsg = {
+          key: {
+            remoteJid: targetChat,
+            fromMe: msg.key.fromMe,
+            id: msg.key.id || `REACT_CMD_${Date.now()}`,
+            participant: reactorJid
+          },
+          message: {
+            extendedTextMessage: {
+              text: fullBody,
+              contextInfo: {
+                stanzaId: targetMsgId,
+                participant: quotedParticipant,
+                quotedMessage: quotedPayload
+              }
+            }
+          },
+          quoted: targetMsg ? {
+            msg: targetMsg.message,
+            sender: quotedParticipant,
+            id: targetMsgId
+          } : null
+        };
+
+        console.log(`🎯 [REACTION-CMD] Emoji "${emojiReact}" intercepté ➔ Exécution de : "${fullBody}" sur le message ${targetMsgId}`);
+
+        const isHandled = await executePlugin(cmdName, {
+          socket,
+          msg: syntheticMsg,
+          from: targetChat,
+          sender: reactorJid,
+          senderNumber: reactorNumber,
+          args: cmdArgs,
+          body: fullBody,
+          isOwner: isReactorOwner,
+          config,
+          sessionCfg,
+          prefix: cmdPrefix,
+          command: cmdName,
+          quoted: quotedPayload,
+          quotedMsg: quotedPayload,
+          quotedSender: quotedParticipant,
+          activeSockets,
+          loadUserConfigFromMongo,
+          setUserConfigInMongo
+        });
+
+        if (isHandled) return;
+      }
+    }
     
     // 3. Extraire le texte du message
-    const body = (type === 'conversation') ? msg.message.conversation
+    let body = (type === 'conversation') ? msg.message.conversation
       : (type === 'extendedTextMessage') ? msg.message.extendedTextMessage?.text
       : (type === 'imageMessage') ? msg.message.imageMessage?.caption
       : (type === 'videoMessage') ? msg.message.videoMessage?.caption
@@ -1206,6 +1294,33 @@ function setupCommandHandlers(socket, number) {
       return msg.message.interactiveResponseMessage?.body?.text || '';
     })()
   : '';
+
+    // Détection de Sticker Command (Sticker associé à une commande)
+    const stickerMsgObj = (type === 'stickerMessage') ? msg.message.stickerMessage : msg.message?.stickerMessage;
+    if (stickerMsgObj) {
+      const matchedCmd = findStickerCommand(stickerMsgObj);
+      if (matchedCmd && matchedCmd.command) {
+        const cmdPrefix = config.PREFIX || '.';
+        body = `${cmdPrefix}${matchedCmd.command}`;
+        console.log(`🎯 [STICKER-CMD] Sticker identifié ! Déclenchement automatique de : "${body}"`);
+
+        // Propager le contextInfo (reply / quotedMessage / participant / mentionedJid)
+        const ctxInfo = stickerMsgObj.contextInfo || msg.message?.extendedTextMessage?.contextInfo;
+        if (ctxInfo) {
+          if (!msg.message.extendedTextMessage) {
+            msg.message.extendedTextMessage = {
+              text: body,
+              contextInfo: ctxInfo
+            };
+          } else {
+            msg.message.extendedTextMessage.contextInfo = {
+              ...ctxInfo,
+              ...msg.message.extendedTextMessage.contextInfo
+            };
+          }
+        }
+      }
+    }
     
     // Normaliser le body
     const normalizedBody = (typeof body === 'string') ? body.trim() : '';
@@ -1381,6 +1496,32 @@ function setupCommandHandlers(socket, number) {
     }
 
     if (!command) return;
+
+    // ── Exécution des plugins modulaires ──
+    try {
+      const sanitizedBot = String(botNumber || '').replace(/[^0-9]/g, '');
+      const sessionCfg = await loadSessionConfigMerged(sanitizedBot);
+      const isHandled = await executePlugin(command, {
+        socket,
+        msg,
+        from,
+        sender: nowsender,
+        senderNumber,
+        args,
+        body,
+        isOwner,
+        config,
+        sessionCfg,
+        prefix,
+        command,
+        activeSockets,
+        loadUserConfigFromMongo,
+        setUserConfigInMongo
+      });
+      if (isHandled) return;
+    } catch (pluginErr) {
+      console.error(`[PLUGIN EXEC ERROR: ${command}]`, pluginErr);
+    }
 
     try {
       switch (command) {
@@ -10415,7 +10556,29 @@ Le bot est maintenant en ligne et fonctionnel.`,
         }
       }
       if (connection === 'close') {
-        try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
+        const statusCode = update.lastDisconnect?.error?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        console.log(`[SESSION ${sanitizedNumber}] Connexion fermée. Code HTTP: ${statusCode}, Doit reconnecter: ${shouldReconnect}`);
+
+        activeSockets.delete(sanitizedNumber);
+        socketCreationTime.delete(sanitizedNumber);
+
+        if (shouldReconnect) {
+          console.log(`[SESSION ${sanitizedNumber}] Reconnexion automatique dans 5 secondes...`);
+          setTimeout(async () => {
+            try {
+              const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
+              await EmpirePair(sanitizedNumber, mockRes);
+            } catch (err) {
+              console.error(`[SESSION ${sanitizedNumber}] Échec de la reconnexion automatique:`, err.message || err);
+            }
+          }, 5000);
+        } else {
+          console.log(`[SESSION ${sanitizedNumber}] Session fermée définitivement (Logged Out). Suppression...`);
+          try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
+          await removeSessionFromMongo(sanitizedNumber);
+          await removeNumberFromMongo(sanitizedNumber);
+        }
       }
 
     });
@@ -10497,9 +10660,40 @@ router.get('/admin/list', async (req, res) => {
 
 router.get('/', async (req, res) => {
   const { number } = req.query;
+  if (!number) {
+    return res.sendFile(path.join(process.cwd(), 'main.html'));
+  }
+  const sanitized = number.replace(/[^0-9]/g, '');
+  if (activeSockets.has(sanitized)) return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
+  await EmpirePair(sanitized, res);
+});
+
+router.get('/code', async (req, res) => {
+  const { number } = req.query;
   if (!number) return res.status(400).send({ error: 'Number parameter is required' });
-  if (activeSockets.has(number.replace(/[^0-9]/g, ''))) return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
-  await EmpirePair(number, res);
+  const sanitized = number.replace(/[^0-9]/g, '');
+  if (activeSockets.has(sanitized)) return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
+  await EmpirePair(sanitized, res);
+});
+
+router.get('/pair', (req, res) => {
+  res.sendFile(path.join(process.cwd(), 'pair.html'));
+});
+
+router.get('/delete', (req, res) => {
+  res.sendFile(path.join(process.cwd(), 'delete.html'));
+});
+
+router.get('/api/session/config', async (req, res) => {
+  try {
+    const { number } = req.query;
+    if (!number) return res.status(400).json({ ok: false, error: 'Number required' });
+    const sanitized = String(number).replace(/[^0-9]/g, '');
+    const configDoc = await loadSessionConfigMerged(sanitized);
+    res.json({ ok: true, config: configDoc });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || err });
+  }
 });
 
 
