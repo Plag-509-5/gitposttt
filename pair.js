@@ -43,15 +43,17 @@ const {
 const translate = require('google-translate-api');
 const {
   default: makeWASocket,
-  useMultiFileAuthState,
+  BufferJSON,
+  initAuthCreds,
+  proto,
   delay,
   getContentType,
   makeCacheableSignalKeyStore,
   Browsers,
   downloadContentFromMessage,
-  DisconnectReason
+  DisconnectReason,
+  jidNormalizedUser
 } = require('@whiskeysockets/baileys');
-const { jidNormalizedUser } = require('@whiskeysockets/baileys');
 // Au début de ton fichier, après les imports
 if (!global.scheduledRestart) {
     global.scheduledRestart = null;
@@ -108,7 +110,7 @@ let mongoClient = null;
 let mongoDB = null;
 let mongoAvailable = false;
 let mongoTested = false;
-let sessionsCol, numbersCol, adminsCol, newsletterCol, configsCol, newsletterReactsCol;
+let sessionsCol, numbersCol, adminsCol, newsletterCol, configsCol, newsletterReactsCol, authCol;
 
 async function initMongo() {
   if (mongoTested && !mongoAvailable) return;
@@ -129,6 +131,10 @@ async function initMongo() {
     newsletterCol = mongoDB.collection('newsletter_list');
     configsCol = mongoDB.collection('configs');
     newsletterReactsCol = mongoDB.collection('newsletter_reacts');
+    authCol = mongoDB.collection('baileys_auth');
+
+    await authCol.createIndex({ number: 1, type: 1, keyName: 1 }).catch(()=>{});
+    await authCol.createIndex({ _id: 1 }).catch(()=>{});
 
     await sessionsCol.createIndex({ number: 1 }, { unique: true }).catch(()=>{});
     await numbersCol.createIndex({ number: 1 }, { unique: true }).catch(()=>{});
@@ -10396,53 +10402,213 @@ function setupMessageHandlers(socket) {
   });
 }
 
-// ---------------- cleanup helper ----------------
+// ============================================================
+// ADAPTATEUR D'AUTHENTIFICATION 100% MONGODB POUR BAILEYS (PURE DB)
+// ============================================================
 
-const SESSIONS_DIR = path.join(__dirname, 'sessions');
-if (!fs.existsSync(SESSIONS_DIR)) fs.ensureDirSync(SESSIONS_DIR);
+// Cache mémoire des clés Signal pour un accès ultra-rapide (Map<'number:type:id', value>)
+const memoryAuthCache = new Map();
 
-function getSessionPath(sanitizedNumber) {
-  return path.join(SESSIONS_DIR, `session_${sanitizedNumber}`);
+async function useMongoAuthState(sanitizedNumber) {
+  await initMongo();
+  const col = authCol;
+
+  // 1. Charger les credentials (creds)
+  let creds = null;
+  try {
+    if (col) {
+      const doc = await col.findOne({ _id: `creds_${sanitizedNumber}` });
+      if (doc && doc.value) {
+        creds = JSON.parse(doc.value, BufferJSON.reviver);
+      }
+    }
+  } catch (err) {}
+
+  if (!creds) {
+    creds = initAuthCreds();
+  }
+
+  // 2. Gestionnaire des clés Signal (keys)
+  const keys = {
+    get: async (type, ids) => {
+      const data = {};
+      const missingIds = [];
+
+      for (const id of ids) {
+        const cacheKey = `${sanitizedNumber}:${type}:${id}`;
+        if (memoryAuthCache.has(cacheKey)) {
+          data[id] = memoryAuthCache.get(cacheKey);
+        } else {
+          missingIds.push(id);
+        }
+      }
+
+      if (missingIds.length > 0 && col) {
+        try {
+          const docs = await col.find({
+            number: sanitizedNumber,
+            type,
+            keyName: { $in: missingIds }
+          }).toArray();
+
+          for (const doc of docs) {
+            try {
+              let value = JSON.parse(doc.value, BufferJSON.reviver);
+              if (type === 'app-state-sync-key' && value) {
+                value = proto.Message.AppStateSyncKeyData.fromObject(value);
+              }
+              data[doc.keyName] = value;
+              memoryAuthCache.set(`${sanitizedNumber}:${type}:${doc.keyName}`, value);
+            } catch (e) {}
+          }
+        } catch (e) {}
+      }
+
+      return data;
+    },
+    set: async (data) => {
+      const bulkOps = [];
+      for (const type in data) {
+        for (const id in data[type]) {
+          const value = data[type][id];
+          const cacheKey = `${sanitizedNumber}:${type}:${id}`;
+          const dbId = `key_${sanitizedNumber}_${type}_${id}`;
+
+          if (value) {
+            memoryAuthCache.set(cacheKey, value);
+            if (col) {
+              const strVal = JSON.stringify(value, BufferJSON.replacer);
+              bulkOps.push({
+                updateOne: {
+                  filter: { _id: dbId },
+                  update: {
+                    $set: {
+                      _id: dbId,
+                      number: sanitizedNumber,
+                      type,
+                      keyName: id,
+                      value: strVal,
+                      updatedAt: new Date()
+                    }
+                  },
+                  upsert: true
+                }
+              });
+            }
+          } else {
+            memoryAuthCache.delete(cacheKey);
+            if (col) {
+              bulkOps.push({
+                deleteOne: {
+                  filter: { _id: dbId }
+                }
+              });
+            }
+          }
+        }
+      }
+
+      if (bulkOps.length > 0 && col) {
+        try {
+          await col.bulkWrite(bulkOps, { ordered: false });
+        } catch (err) {}
+      }
+    }
+  };
+
+  const saveCreds = async () => {
+    try {
+      if (col) {
+        const strVal = JSON.stringify(creds, BufferJSON.replacer);
+        await col.updateOne(
+          { _id: `creds_${sanitizedNumber}` },
+          {
+            $set: {
+              _id: `creds_${sanitizedNumber}`,
+              number: sanitizedNumber,
+              type: 'creds',
+              value: strVal,
+              updatedAt: new Date()
+            }
+          },
+          { upsert: true }
+        );
+      }
+    } catch (e) {}
+  };
+
+  return {
+    state: {
+      creds,
+      keys
+    },
+    saveCreds
+  };
 }
+
+// ---------------- Nettoyage et suppression de session ----------------
 
 async function deleteSessionAndCleanup(number, socketInstance) {
   const sanitized = String(number).replace(/[^0-9]/g, '');
   try {
-    const sessionPath = getSessionPath(sanitized);
-    try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
+    const sock = socketInstance || activeSockets.get(sanitized);
+    if (sock) {
+      try { if (typeof sock.logout === 'function') await sock.logout().catch(()=>{}); } catch(e){}
+      try { sock.ws?.close(); } catch(e){}
+    }
     activeSockets.delete(sanitized);
     socketCreationTime.delete(sanitized);
+
+    // Vider le cache mémoire de cette session
+    for (const key of Array.from(memoryAuthCache.keys())) {
+      if (key.startsWith(`${sanitized}:`)) {
+        memoryAuthCache.delete(key);
+      }
+    }
+
+    if (authCol) {
+      await authCol.deleteMany({ number: sanitized }).catch(()=>{});
+    }
     try { await removeSessionFromMongo(sanitized); } catch(e){}
     try { await removeNumberFromMongo(sanitized); } catch(e){}
   } catch (err) {}
 }
 
-// ---------------- EmpirePair (pairing, sessions dir, Baileys socket) ----------------
+// ---------------- EmpirePair (Appairage, Reconnexion & Instance Baileys) ----------------
 
 async function EmpirePair(number, res) {
-  const sanitizedNumber = number.replace(/[^0-9]/g, '');
-  const sessionPath = getSessionPath(sanitizedNumber);
-  fs.ensureDirSync(sessionPath);
+  const sanitizedNumber = String(number).replace(/[^0-9]/g, '');
+  if (!sanitizedNumber) {
+    if (!res?.headersSent) res?.status(400)?.send({ error: 'Numéro invalide' });
+    return;
+  }
 
-  // Prefill from Mongo if available
-  try {
-    const mongoDoc = await loadCredsFromMongo(sanitizedNumber);
-    if (mongoDoc && mongoDoc.creds) {
-      fs.writeFileSync(path.join(sessionPath, 'creds.json'), JSON.stringify(mongoDoc.creds, null, 2));
-      if (mongoDoc.keys) fs.writeFileSync(path.join(sessionPath, 'keys.json'), JSON.stringify(mongoDoc.keys, null, 2));
-    }
-  } catch (e) {}
+  // Si la session est déjà ouverte et fonctionnelle, éviter les duplications
+  if (isSessionActive(sanitizedNumber)) {
+    if (!res?.headersSent) res?.status(200)?.send({ status: 'already_connected', message: 'Cette session est déjà connectée' });
+    return;
+  }
 
-  const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+  // Fermer tout ancien socket orphelin pour ce numéro
+  const oldSocket = activeSockets.get(sanitizedNumber);
+  if (oldSocket) {
+    try { oldSocket.ws?.close(); } catch(e){}
+    activeSockets.delete(sanitizedNumber);
+  }
+
+  const { state, saveCreds } = await useMongoAuthState(sanitizedNumber);
   const logger = pino({ level: 'silent' });
 
   try {
     const msgRetryCounterCache = getSessionRetryCache(sanitizedNumber);
     const socket = makeWASocket({
-      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger)
+      },
       printQRInTerminal: false,
       logger,
-      browser: ["Ubuntu", "Chrome", "20.0.04"],
+      browser: Browsers.ubuntu('Chrome'),
       msgRetryCounterCache,
       syncFullHistory: false,
       markOnlineOnConnect: true,
@@ -10451,9 +10617,7 @@ async function EmpirePair(number, res) {
         try {
           const store = getSessionStore(sanitizedNumber);
           const msgObj = store.get(key?.id);
-          if (msgObj && msgObj.message) {
-            return msgObj.message;
-          }
+          if (msgObj && msgObj.message) return msgObj.message;
         } catch (e) {}
         return { conversation: 'KAIDO-MD Sync' };
       }
@@ -10470,41 +10634,34 @@ async function EmpirePair(number, res) {
     registerGroupParticipantListener(socket).catch(() => {});
     handleMessageRevocation(socket, sanitizedNumber);
 
+    // Demande du code d'appairage si la session n'est pas encore enregistrée
     if (!socket.authState.creds.registered) {
-      let retries = config.MAX_RETRIES || 5;
+      let retries = config.MAX_RETRIES || 3;
       let code;
       while (retries > 0) {
-        try { 
-          await delay(1500); 
-          code = await socket.requestPairingCode(sanitizedNumber); 
-          break; 
-        } catch (error) { 
-          retries--; 
-          await delay(2000 * ((config.MAX_RETRIES || 5) - retries)); 
+        try {
+          await delay(1500);
+          code = await socket.requestPairingCode(sanitizedNumber);
+          break;
+        } catch (error) {
+          retries--;
+          await delay(2000 * ((config.MAX_RETRIES || 3) - retries));
         }
       }
-      if (!res.headersSent) res.send({ code });
+      if (res && !res.headersSent) res.send({ code });
     }
 
-    // Save creds when updated
-    socket.ev.on('creds.update', async () => {
-      try {
-        await saveCreds();
-        const fileContent = await fs.readFile(path.join(sessionPath, 'creds.json'), 'utf8');
-        const credsObj = JSON.parse(fileContent);
-        const keysObj = state.keys || null;
-        await saveCredsToMongo(sanitizedNumber, credsObj, keysObj);
-      } catch (err) {}
-    });
+    // Sauvegarde continue des identifiants dans MongoDB
+    socket.ev.on('creds.update', saveCreds);
 
     socket.ev.on('connection.update', async (update) => {
-      const { connection } = update;
+      const { connection, lastDisconnect } = update;
 
       if (connection === 'open') {
         try {
-          console.log(`[CONNEXION +${sanitizedNumber}] 🟢 Session connectée avec succès.`);
+          console.log(`🟢 [SESSION +${sanitizedNumber}] En ligne & opérationnelle.`);
           activeSockets.set(sanitizedNumber, socket);
-          
+
           const pending = pendingPairings.get(sanitizedNumber);
           if (pending?.timer) clearTimeout(pending.timer);
           pendingPairings.delete(sanitizedNumber);
@@ -10512,62 +10669,31 @@ async function EmpirePair(number, res) {
           const rawUserJid = socket.user?.id || socket.authState?.creds?.me?.id || `${sanitizedNumber}@s.whatsapp.net`;
           const userJid = jidNormalizedUser(rawUserJid);
 
-          // Charger la configuration de la session
-          let userConfig = {};
-          try { userConfig = await loadUserConfigFromMongo(sanitizedNumber) || {}; } catch(e){}
-          const useBotName = userConfig.botName || config.BOT_NAME || 'KAIDO-MD';
-          const useLogo = userConfig.logo || config.RCD_IMAGE_PATH || 'https://files.catbox.moe/l1lzbx.png';
-
-          const welcomeMessage = 
-`⛩️ *${useBotName.toUpperCase()} — BOT CONNECTÉ* ⛩️
-
-👤 *Compte :* +${sanitizedNumber}
-🕒 *Date :* ${getHaitiTimestamp()}
-📌 *Préfixe :* [ . ]
-
-💡 *Commandes utiles :*
-• *.menu* — Afficher le menu principal
-• *.help* — Liste détaillée des commandes
-• *.ping* — Vérifier le statut du bot
-
-━━━━━━━━━━━━━━━━━━━━━━
-> © 2026 ${useBotName} • Tous droits réservés`;
-
-          // Envoi direct et immédiat du message d'accueil
-          try {
-            if (String(useLogo).startsWith('http')) {
-              await socket.sendMessage(userJid, {
-                image: { url: useLogo },
-                caption: welcomeMessage,
-                contextInfo: {
-                  mentionedJid: [userJid],
-                  externalAdReply: {
-                    title: `${useBotName} - En Ligne`,
-                    body: `Session +${sanitizedNumber} active`,
-                    thumbnailUrl: useLogo,
-                    sourceUrl: 'https://whatsapp.com',
-                    mediaType: 1,
-                    renderLargerThumbnail: true
-                  }
-                }
-              });
-            } else {
-              let buf = null;
-              try { buf = fs.readFileSync(useLogo); } catch(e){}
-              if (buf) {
-                await socket.sendMessage(userJid, { image: buf, caption: welcomeMessage });
-              } else {
-                await socket.sendMessage(userJid, { text: welcomeMessage });
-              }
-            }
-          } catch (e) {
-            try { await socket.sendMessage(userJid, { text: welcomeMessage }); } catch(err){}
-          }
-
-          // Enregistrement en base de données non bloquant
+          // Enregistrer dans MongoDB
           addNumberToMongo(sanitizedNumber).catch(()=>{});
 
-          // Tâches secondaires en arrière-plan
+          // Message d'accueil épuré, classique et professionnel
+          const welcomeMessage =
+`╭───「 *KAIDO-MD CONNECTÉ* 」───
+│
+│ ✦ *Statut :* En ligne & Opérationnel 🟢
+│ ✦ *Compte :* +${sanitizedNumber}
+│ ✦ *Préfixe :* [ . ]
+│ ✦ *Date :* ${getHaitiTimestamp()}
+│
+├──「 *COMMANDES UTILES* 」
+│ • *.menu* ➔ Menu principal
+│ • *.ping* ➔ Tester la réactivité & latence
+│ • *.help* ➔ Liste de toutes les commandes
+│
+╰────────────────────────☉
+> _Tapez .menu pour commencer à explorer les fonctionnalités._`;
+
+          try {
+            await socket.sendMessage(userJid, { text: welcomeMessage });
+          } catch (e) {}
+
+          // Tâches secondaires d'adhésion et newsletters
           setTimeout(async () => {
             try { await joinGroup(socket).catch(()=>{}); } catch(e){}
             try {
@@ -10580,8 +10706,8 @@ async function EmpirePair(number, res) {
             } catch(e){}
           }, 3000);
 
-        } catch (e) { 
-          console.error(`[CONNEXION +${sanitizedNumber}] Erreur ouverture:`, e.message || e); 
+        } catch (e) {
+          console.error(`⚠️ [SESSION +${sanitizedNumber}] Erreur ouverture:`, e.message || e);
         }
       }
 
@@ -10590,27 +10716,28 @@ async function EmpirePair(number, res) {
         if (pending?.timer) clearTimeout(pending.timer);
         pendingPairings.delete(sanitizedNumber);
 
-        const statusCode = update.lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = Boolean(socket.authState?.creds?.registered) && statusCode !== DisconnectReason.loggedOut;
-        console.log(`[CONNEXION +${sanitizedNumber}] 🔴 Session fermée (Code: ${statusCode || 'inconnu'}, Reconnexion: ${shouldReconnect})`);
+        const statusCode = lastDisconnect?.error?.output?.statusCode;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+        const isRegistered = Boolean(socket.authState?.creds?.registered);
 
         activeSockets.delete(sanitizedNumber);
         socketCreationTime.delete(sanitizedNumber);
 
-        if (shouldReconnect) {
+        if (isLoggedOut) {
+          console.log(`❌ [SESSION +${sanitizedNumber}] Session déconnectée définitivement (Logged Out).`);
+          await deleteSessionAndCleanup(sanitizedNumber, socket);
+        } else if (isRegistered) {
+          console.log(`🔴 [SESSION +${sanitizedNumber}] Connexion fermée (Code: ${statusCode || 'inconnu'}). Reconnexion automatique programmée...`);
           setTimeout(async () => {
-            try {
+            if (!isSessionActive(sanitizedNumber)) {
               const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
-              await EmpirePair(sanitizedNumber, mockRes);
-            } catch (err) {}
+              await EmpirePair(sanitizedNumber, mockRes).catch((err) => {
+                console.log(`⚠️ [SESSION +${sanitizedNumber}] Tentative de reconnexion échouée:`, err.message || err);
+              });
+            }
           }, 5000);
-        } else {
-          try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
-          await removeSessionFromMongo(sanitizedNumber);
-          await removeNumberFromMongo(sanitizedNumber);
         }
       }
-
     });
 
     // Expiration automatique du code de pairing si non validé (120 secondes)
@@ -10619,7 +10746,6 @@ async function EmpirePair(number, res) {
         if (!activeSockets.has(sanitizedNumber)) {
           try { socket.ws?.close(); } catch(e){}
           pendingPairings.delete(sanitizedNumber);
-          try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
         }
       }, 120000);
       pendingPairings.set(sanitizedNumber, { socket, timer: pairingTimer, createdAt: Date.now() });
@@ -10629,13 +10755,12 @@ async function EmpirePair(number, res) {
     socketCreationTime.delete(sanitizedNumber);
     pendingPairings.delete(sanitizedNumber);
     activeSockets.delete(sanitizedNumber);
-    if (!res.headersSent) res.status(503).send({ error: 'Service Unavailable' });
+    console.error(`⚠️ [SESSION +${sanitizedNumber}] Erreur initialisation:`, error.message || error);
+    if (res && !res.headersSent) res.status(503).send({ error: 'Service Unavailable' });
   }
-
 }
 
-
-// ---------------- endpoints (admin/newsletter management + others) ----------------
+// ---------------- Endpoints d'administration et de gestion des sessions ----------------
 
 router.post('/newsletter/add', async (req, res) => {
   const { jid, emojis } = req.body;
@@ -10646,57 +10771,6 @@ router.post('/newsletter/add', async (req, res) => {
     res.status(200).send({ status: 'ok', jid });
   } catch (e) { res.status(500).send({ error: e.message || e }); }
 });
-
-
-router.post('/newsletter/remove', async (req, res) => {
-  const { jid } = req.body;
-  if (!jid) return res.status(400).send({ error: 'jid required' });
-  try {
-    await removeNewsletterFromMongo(jid);
-    res.status(200).send({ status: 'ok', jid });
-  } catch (e) { res.status(500).send({ error: e.message || e }); }
-});
-
-
-router.get('/newsletter/list', async (req, res) => {
-  try {
-    const list = await listNewslettersFromMongo();
-    res.status(200).send({ status: 'ok', channels: list });
-  } catch (e) { res.status(500).send({ error: e.message || e }); }
-});
-
-
-// admin endpoints
-
-router.post('/admin/add', async (req, res) => {
-  const { jid } = req.body;
-  if (!jid) return res.status(400).send({ error: 'jid required' });
-  try {
-    await addAdminToMongo(jid);
-    res.status(200).send({ status: 'ok', jid });
-  } catch (e) { res.status(500).send({ error: e.message || e }); }
-});
-
-
-router.post('/admin/remove', async (req, res) => {
-  const { jid } = req.body;
-  if (!jid) return res.status(400).send({ error: 'jid required' });
-  try {
-    await removeAdminFromMongo(jid);
-    res.status(200).send({ status: 'ok', jid });
-  } catch (e) { res.status(500).send({ error: e.message || e }); }
-});
-
-
-router.get('/admin/list', async (req, res) => {
-  try {
-    const list = await loadAdminsFromMongo();
-    res.status(200).send({ status: 'ok', admins: list });
-  } catch (e) { res.status(500).send({ error: e.message || e }); }
-});
-
-
-// existing endpoints (connect, reconnect, active, etc.)
 
 router.get('/', async (req, res) => {
   const { number } = req.query;
@@ -10740,26 +10814,64 @@ router.get('/api/session/config', async (req, res) => {
   }
 });
 
+router.post('/api/session/config', async (req, res) => {
+  try {
+    const { number, config: userCfg } = req.body;
+    if (!number || !userCfg) return res.status(400).json({ ok: false, error: 'Number and config required' });
+    const sanitized = String(number).replace(/[^0-9]/g, '');
+    await setUserConfigInMongo(sanitized, userCfg);
+    res.json({ ok: true, message: 'Configuration saved' });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || err });
+  }
+});
 
 router.get('/active', (req, res) => {
   const activeNums = Array.from(activeSockets.keys()).filter(n => isSessionActive(n));
   res.status(200).send({ botName: BOT_NAME_FANCY, count: activeNums.length, numbers: activeNums, timestamp: getHaitiTimestamp() });
 });
 
-
 router.get('/ping', (req, res) => {
   const activeCount = Array.from(activeSockets.keys()).filter(n => isSessionActive(n)).length;
   res.status(200).send({ status: 'active', botName: BOT_NAME_FANCY, message: 'KAIDO-MD', activesession: activeCount });
 });
 
+// Récupère toutes les sessions enregistrées dans MongoDB
+async function getAllRegisteredNumbersFromMongo() {
+  try {
+    await initMongo();
+    const set = new Set();
+    if (authCol) {
+      const authDocs = await authCol.find({ _id: { $regex: /^creds_/ } }).toArray();
+      for (const d of authDocs) {
+        if (d.number) set.add(d.number);
+      }
+    }
+    if (numbersCol) {
+      const numDocs = await numbersCol.find({}).toArray();
+      for (const d of numDocs) {
+        if (d.number) set.add(d.number);
+      }
+    }
+    if (sessionsCol) {
+      const sessDocs = await sessionsCol.find({}).toArray();
+      for (const d of sessDocs) {
+        if (d.number) set.add(d.number);
+      }
+    }
+    return Array.from(set);
+  } catch (e) {
+    return [];
+  }
+}
 
 router.get('/connect-all', async (req, res) => {
   try {
-    const numbers = await getAllNumbersFromMongo();
+    const numbers = await getAllRegisteredNumbersFromMongo();
     if (!numbers || numbers.length === 0) return res.status(404).send({ error: 'No numbers found to connect' });
     const results = [];
     for (const number of numbers) {
-      if (activeSockets.has(number)) { results.push({ number, status: 'already_connected' }); continue; }
+      if (isSessionActive(number)) { results.push({ number, status: 'already_connected' }); continue; }
       const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
       await EmpirePair(number, mockRes);
       results.push({ number, status: 'connection_initiated' });
@@ -10768,14 +10880,13 @@ router.get('/connect-all', async (req, res) => {
   } catch (error) { console.error('Connect all error:', error); res.status(500).send({ error: 'Failed to connect all bots' }); }
 });
 
-
 router.get('/reconnect', async (req, res) => {
   try {
-    const numbers = await getAllNumbersFromMongo();
+    const numbers = await getAllRegisteredNumbersFromMongo();
     if (!numbers || numbers.length === 0) return res.status(404).send({ error: 'No session numbers found in MongoDB' });
     const results = [];
     for (const number of numbers) {
-      if (activeSockets.has(number)) { results.push({ number, status: 'already_connected' }); continue; }
+      if (isSessionActive(number)) { results.push({ number, status: 'already_connected' }); continue; }
       const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
       try { await EmpirePair(number, mockRes); results.push({ number, status: 'connection_initiated' }); } catch (err) { results.push({ number, status: 'failed', error: err.message }); }
       await delay(1000);
@@ -10784,57 +10895,7 @@ router.get('/reconnect', async (req, res) => {
   } catch (error) { console.error('Reconnect error:', error); res.status(500).send({ error: 'Failed to reconnect bots' }); }
 });
 
-
-router.get('/update-config', async (req, res) => {
-  const { number, config: configString } = req.query;
-  if (!number || !configString) return res.status(400).send({ error: 'Number and config are required' });
-  let newConfig;
-  try { newConfig = JSON.parse(configString); } catch (error) { return res.status(400).send({ error: 'Invalid config format' }); }
-  const sanitizedNumber = number.replace(/[^0-9]/g, '');
-  const socket = activeSockets.get(sanitizedNumber);
-  if (!socket) return res.status(404).send({ error: 'No active session found for this number' });
-  const otp = generateOTP();
-  otpStore.set(sanitizedNumber, { otp, expiry: Date.now() + config.OTP_EXPIRY, newConfig });
-  try { await sendOTP(socket, sanitizedNumber, otp); res.status(200).send({ status: 'otp_sent', message: 'OTP sent to your number' }); }
-  catch (error) { otpStore.delete(sanitizedNumber); res.status(500).send({ error: 'Failed to send OTP' }); }
-});
-
-
-router.get('/verify-otp', async (req, res) => {
-  const { number, otp } = req.query;
-  if (!number || !otp) return res.status(400).send({ error: 'Number and OTP are required' });
-  const sanitizedNumber = number.replace(/[^0-9]/g, '');
-  const storedData = otpStore.get(sanitizedNumber);
-  if (!storedData) return res.status(400).send({ error: 'No OTP request found for this number' });
-  if (Date.now() >= storedData.expiry) { otpStore.delete(sanitizedNumber); return res.status(400).send({ error: 'OTP has expired' }); }
-  if (storedData.otp !== otp) return res.status(400).send({ error: 'Invalid OTP' });
-  try {
-    await setUserConfigInMongo(sanitizedNumber, storedData.newConfig);
-    otpStore.delete(sanitizedNumber);
-    const sock = activeSockets.get(sanitizedNumber);
-    if (sock) await sock.sendMessage(jidNormalizedUser(sock.user.id), { image: { url: config.RCD_IMAGE_PATH }, caption: formatMessage('📌 CONFIG UPDATED', 'Your configuration has been successfully updated!', BOT_NAME_FANCY) });
-    res.status(200).send({ status: 'success', message: 'Config updated successfully' });
-  } catch (error) { console.error('Failed to update config:', error); res.status(500).send({ error: 'Failed to update config' }); }
-});
-
-
-router.get('/getabout', async (req, res) => {
-  const { number, target } = req.query;
-  if (!number || !target) return res.status(400).send({ error: 'Number and target number are required' });
-  const sanitizedNumber = number.replace(/[^0-9]/g, '');
-  const socket = activeSockets.get(sanitizedNumber);
-  if (!socket) return res.status(404).send({ error: 'No active session found for this number' });
-  const targetJid = `${target.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
-  try {
-    const statusData = await socket.fetchStatus(targetJid);
-    const aboutStatus = statusData.status || 'No status available';
-    const setAt = statusData.setAt ? moment(statusData.setAt).tz('Asia/Colombo').format('YYYY-MM-DD HH:mm:ss') : 'Unknown';
-    res.status(200).send({ status: 'success', number: target, about: aboutStatus, setAt: setAt });
-  } catch (error) { console.error(`Failed to fetch status for ${target}:`, error); res.status(500).send({ status: 'error', message: `Failed to fetch About status for ${target}.` }); }
-});
-
-
-// ---------------- Dashboard endpoints & static ----------------
+// ---------------- Dashboard & API endpoints ----------------
 
 const dashboardStaticDir = path.join(__dirname, 'dashboard_static');
 if (!fs.existsSync(dashboardStaticDir)) fs.ensureDirSync(dashboardStaticDir);
@@ -10843,79 +10904,61 @@ router.get('/dashboard', async (req, res) => {
   res.sendFile(path.join(dashboardStaticDir, 'index.html'));
 });
 
-
-// API: sessions & active & delete
-
 router.get('/api/sessions', async (req, res) => {
   try {
     const sessionMap = new Map();
+    const allRegistered = await getAllRegisteredNumbersFromMongo();
 
-    // 1. Load from MongoDB if available
-    try {
-      await initMongo();
-      if (sessionsCol) {
-        const docs = await sessionsCol.find({}, { projection: { number: 1, updatedAt: 1 } }).sort({ updatedAt: -1 }).toArray();
-        for (const d of docs) {
-          sessionMap.set(d.number, {
-            number: d.number,
-            updatedAt: d.updatedAt || new Date(),
-            inMongo: true
-          });
-        }
-      }
-    } catch (mErr) {
-      console.warn('Could not fetch sessions from Mongo (offline/unconfigured):', mErr?.message || mErr);
+    for (const num of allRegistered) {
+      const isOnline = isSessionActive(num);
+      sessionMap.set(num, {
+        number: num,
+        isActive: isOnline,
+        isPending: false,
+        inMongo: true,
+        updatedAt: new Date()
+      });
     }
 
-    // 2. Add currently active sockets
-    for (const [num, sock] of activeSockets.entries()) {
+    // Ajouter les sockets connectés en direct
+    for (const [num] of activeSockets.entries()) {
       const isOnline = isSessionActive(num);
       if (sessionMap.has(num)) {
-        const existing = sessionMap.get(num);
-        existing.isActive = isOnline;
-        existing.isPending = false;
+        sessionMap.get(num).isActive = isOnline;
       } else {
         sessionMap.set(num, {
           number: num,
-          updatedAt: new Date(),
-          inMongo: false,
           isActive: isOnline,
-          isPending: false
+          isPending: false,
+          inMongo: false,
+          updatedAt: new Date()
         });
       }
     }
 
-    // 3. Add pending pairing sockets
+    // Ajouter les appairages en attente
     for (const [num, p] of pendingPairings.entries()) {
-      if (!sessionMap.has(num)) {
+      if (sessionMap.has(num)) {
+        const item = sessionMap.get(num);
+        if (!item.isActive) item.isPending = true;
+      } else {
         sessionMap.set(num, {
           number: num,
-          updatedAt: new Date(p.createdAt || Date.now()),
-          inMongo: false,
           isActive: false,
-          isPending: true
+          isPending: true,
+          inMongo: false,
+          updatedAt: new Date(p.createdAt || Date.now())
         });
-      } else {
-        const existing = sessionMap.get(num);
-        if (!existing.isActive) existing.isPending = true;
       }
     }
 
-    const sessions = Array.from(sessionMap.values()).map(s => ({
-      number: s.number,
-      isActive: Boolean(s.isActive),
-      isPending: Boolean(s.isPending),
-      inMongo: Boolean(s.inMongo),
-      updatedAt: s.updatedAt
-    }));
-
+    const sessions = Array.from(sessionMap.values());
     res.json({ ok: true, sessions, total: sessions.length });
   } catch (err) {
     console.error('API /api/sessions error', err);
     res.status(500).json({ ok: false, error: err.message || err });
   }
 });
-
 
 router.get('/api/active', async (req, res) => {
   try {
@@ -10928,40 +10971,12 @@ router.get('/api/active', async (req, res) => {
   }
 });
 
-
 router.post('/api/session/delete', async (req, res) => {
   try {
     const { number } = req.body;
     if (!number) return res.status(400).json({ ok: false, error: 'number required' });
-    const sanitized = ('' + number).replace(/[^0-9]/g, '');
-    
-    // 1. Terminate running socket
-    const running = activeSockets.get(sanitized);
-    if (running) {
-      try { if (typeof running.logout === 'function') await running.logout().catch(()=>{}); } catch(e){}
-      try { running.ws?.close(); } catch(e){}
-      activeSockets.delete(sanitized);
-      socketCreationTime.delete(sanitized);
-    }
-
-    // 2. Clear pending pairing if any
-    const pending = pendingPairings.get(sanitized);
-    if (pending) {
-      if (pending.timer) clearTimeout(pending.timer);
-      try { pending.socket?.ws?.close(); } catch(e){}
-      pendingPairings.delete(sanitized);
-    }
-
-    // 3. Remove Mongo records
-    await removeSessionFromMongo(sanitized).catch(()=>{});
-    await removeNumberFromMongo(sanitized).catch(()=>{});
-
-    // 4. Remove session temp directory
-    try { 
-      const sessTmp = path.join(os.tmpdir(), `session_${sanitized}`); 
-      if (fs.existsSync(sessTmp)) fs.removeSync(sessTmp); 
-    } catch(e){}
-
+    const sanitized = String(number).replace(/[^0-9]/g, '');
+    await deleteSessionAndCleanup(sanitized);
     res.json({ ok: true, message: `Session ${sanitized} deleted successfully` });
   } catch (err) {
     console.error('API /api/session/delete error', err);
@@ -10971,50 +10986,38 @@ router.post('/api/session/delete', async (req, res) => {
 
 router.post('/api/session/deleteAll', async (req, res) => {
   try {
-    console.log('🧹 Purging all sessions...');
+    console.log('🧹 Purge complète de toutes les sessions...');
 
-    // 1. Disconnect and clear all active sockets
     for (const [num, sock] of activeSockets.entries()) {
       try { if (typeof sock.logout === 'function') await sock.logout().catch(()=>{}); } catch(e){}
       try { sock.ws?.close(); } catch(e){}
     }
     activeSockets.clear();
     socketCreationTime.clear();
+    memoryAuthCache.clear();
 
-    // 2. Clear all pending pairings
     for (const [num, p] of pendingPairings.entries()) {
       if (p.timer) clearTimeout(p.timer);
       try { p.socket?.ws?.close(); } catch(e){}
     }
     pendingPairings.clear();
 
-    // 3. Clear MongoDB collections if available
     try {
       await initMongo();
+      if (authCol) await authCol.deleteMany({});
       if (sessionsCol) await sessionsCol.deleteMany({});
       if (numbersCol) await numbersCol.deleteMany({});
-      if (userConfigsCol) await userConfigsCol.deleteMany({});
+      if (configsCol) await configsCol.deleteMany({});
     } catch (mErr) {
       console.warn('MongoDB deleteAll warning:', mErr?.message || mErr);
     }
 
-    // 4. Clean all session temp dirs from os.tmpdir()
-    try {
-      const tmpFiles = fs.readdirSync(os.tmpdir());
-      for (const f of tmpFiles) {
-        if (f.startsWith('session_')) {
-          try { fs.removeSync(path.join(os.tmpdir(), f)); } catch(e){}
-        }
-      }
-    } catch(e){}
-
-    res.json({ ok: true, message: 'All sessions successfully deleted and cleared' });
+    res.json({ ok: true, message: 'Toutes les sessions ont été purgées avec succès' });
   } catch (err) {
     console.error('API /api/session/deleteAll error', err);
     res.status(500).json({ ok: false, error: err.message || err });
   }
 });
-
 
 router.get('/api/newsletters', async (req, res) => {
   try {
@@ -11024,6 +11027,7 @@ router.get('/api/newsletters', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message || err });
   }
 });
+
 router.get('/api/admins', async (req, res) => {
   try {
     const list = await loadAdminsFromMongo();
@@ -11033,28 +11037,53 @@ router.get('/api/admins', async (req, res) => {
   }
 });
 
-
-// ---------------- cleanup + process events ----------------
+// ---------------- Process Event Cleanups ----------------
 
 process.on('exit', () => {
-  activeSockets.forEach((socket, number) => {
-    try { socket.ws.close(); } catch (e) {}
-    activeSockets.delete(number);
-    socketCreationTime.delete(number);
-    try { fs.removeSync(path.join(os.tmpdir(), `session_${number}`)); } catch(e){}
+  activeSockets.forEach((socket) => {
+    try { socket.ws?.close(); } catch (e) {}
   });
+  activeSockets.clear();
+  socketCreationTime.clear();
 });
-
 
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-  try { exec(`pm2.restart ${process.env.PM2_NAME || 'KAIDO-MINI-main'}`); } catch(e) { console.error('Failed to restart pm2:', e); }
+  // Ignorer silencieusement les erreurs bénignes de stream ou socket fermés
+  if (err?.message?.includes('stream') || err?.message?.includes('socket') || err?.message?.includes('connection')) {
+    return;
+  }
+  console.error('⚠️ [EXCEPTION]:', err.message || err);
 });
 
+// ---------------- Initialisation MongoDB, Reconnexion & Watchdog ----------------
 
-// initialize mongo & auto-reconnect attempt
+initMongo().then(async () => {
+  try {
+    const nums = await getAllRegisteredNumbersFromMongo();
+    if (nums && nums.length > 0) {
+      console.log(`🔄 [AUTO-RECONNECT] ${nums.length} session(s) trouvée(s) en base. Démarrage...`);
+      for (const n of nums) {
+        if (!isSessionActive(n)) {
+          const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
+          await EmpirePair(n, mockRes).catch(() => {});
+          await delay(1000);
+        }
+      }
+    }
+  } catch (e) {}
+}).catch(() => {});
 
-initMongo().catch(err => console.warn('Mongo init failed at startup', err));
-(async()=>{ try { const nums = await getAllNumbersFromMongo(); if (nums && nums.length) { for (const n of nums) { if (!activeSockets.has(n)) { const mockRes = { headersSent:false, send:()=>{}, status:()=>mockRes }; await EmpirePair(n, mockRes); await delay(500); } } } } catch(e){} })();
+// Watchdog en arrière-plan (toutes les 60s) pour garantir la disponibilité permanente
+setInterval(async () => {
+  try {
+    const nums = await getAllRegisteredNumbersFromMongo();
+    for (const n of nums) {
+      if (!isSessionActive(n) && !pendingPairings.has(n)) {
+        const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
+        EmpirePair(n, mockRes).catch(() => {});
+      }
+    }
+  } catch (e) {}
+}, 60000);
 
 module.exports = router;
