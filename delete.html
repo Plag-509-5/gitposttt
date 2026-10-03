@@ -1,72 +1,292 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-<meta charset="UTF-8">
-<title>Supprimer toutes les sessions</title>
-<style>
-body {
-  font-family: Arial, sans-serif;
-  background: #121212;
-  color: #fff;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
-}
-.container {
-  background: rgba(0,0,0,0.85);
-  padding: 30px;
-  border-radius: 12px;
-  text-align: center;
-  width: 350px;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-}
-button {
-  width: 100%;
-  height: 48px;
-  border: none;
-  border-radius: 8px;
-  background: #ff6b6b;
-  font-weight: bold;
-  cursor: pointer;
-  color: #fff;
-  margin-top: 20px;
-}
-button:hover {
-  background: #e53935;
-}
-#result {
-  margin-top: 20px;
-  font-size: 14px;
-}
-</style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KAIDO-MD — Purge et Suppression de Sessions</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --card-bg: rgba(17, 24, 39, 0.85);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --danger: #ef4444;
+            --danger-hover: #dc2626;
+            --danger-glow: rgba(239, 68, 68, 0.3);
+            --accent-primary: #6366f1;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: radial-gradient(circle at 50% 20%, rgba(239, 68, 68, 0.12) 0%, transparent 50%),
+                        radial-gradient(circle at 80% 80%, rgba(99, 102, 241, 0.08) 0%, transparent 40%),
+                        var(--bg-primary);
+            min-height: 100vh;
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            padding: 2.5rem 2rem;
+            width: 100%;
+            max-width: 480px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+            text-align: center;
+        }
+
+        .header-icon {
+            width: 64px;
+            height: 64px;
+            border-radius: 18px;
+            background: rgba(239, 68, 68, 0.15);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            margin: 0 auto 1.5rem auto;
+            box-shadow: 0 0 20px var(--danger-glow);
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+
+        p.subtitle {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            margin-bottom: 2rem;
+            line-height: 1.5;
+        }
+
+        .form-section {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.25rem;
+            margin-bottom: 1.5rem;
+            text-align: left;
+        }
+
+        .form-section label {
+            display: block;
+            font-size: 0.82rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 12px 14px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 0.95rem;
+            font-family: inherit;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.25);
+        }
+
+        .btn-single {
+            padding: 0 16px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            border-radius: 10px;
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 0.88rem;
+        }
+
+        .btn-single:hover {
+            background: rgba(255, 255, 255, 0.15);
+            border-color: rgba(255, 255, 255, 0.25);
+        }
+
+        .divider {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 1.5rem 0;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .divider::before, .divider::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: var(--card-border);
+        }
+
+        .btn-danger-all {
+            width: 100%;
+            padding: 14px;
+            border: none;
+            border-radius: 12px;
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+            color: white;
+            font-size: 0.95rem;
+            font-weight: 700;
+            cursor: pointer;
+            box-shadow: 0 4px 15px var(--danger-glow);
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-danger-all:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(239, 68, 68, 0.5);
+            background: linear-gradient(135deg, #f87171 0%, #dc2626 100%);
+        }
+
+        .btn-danger-all:active {
+            transform: translateY(0);
+        }
+
+        #result {
+            margin-top: 1.5rem;
+            font-size: 0.9rem;
+            font-weight: 500;
+            min-height: 24px;
+            line-height: 1.4;
+            transition: all 0.3s;
+        }
+
+        .back-link {
+            display: inline-block;
+            margin-top: 1.8rem;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.88rem;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .back-link:hover {
+            color: #fff;
+        }
+    </style>
 </head>
 <body>
 
 <div class="container">
-  <h2>Supprimer toutes les sessions</h2>
-  <p>⚠️ Cette action est irréversible</p>
-  <button id="deleteAllBtn">Tout Supprimer</button>
-  <div id="result"></div>
+    <div class="header-icon">⚠️</div>
+    <h1>Purge des Sessions</h1>
+    <p class="subtitle">Déconnecte et efface complètement les sessions de la mémoire, de la base MongoDB et du stockage local.</p>
+
+    <!-- Supprimer une session précise -->
+    <div class="form-section">
+        <label for="singleNumber">Supprimer un numéro unique</label>
+        <div class="input-group">
+            <input type="text" id="singleNumber" placeholder="Ex: 50937000000" />
+            <button class="btn-single" id="deleteSingleBtn">Effacer</button>
+        </div>
+    </div>
+
+    <div class="divider">ou</div>
+
+    <!-- Tout supprimer -->
+    <button class="btn-danger-all" id="deleteAllBtn">
+        <span>🗑️</span>
+        <span>Purger toutes les sessions</span>
+    </button>
+
+    <div id="result"></div>
+
+    <a href="/dashboard" class="back-link">← Retourner au Dashboard</a>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.0.0-alpha.1/axios.min.js"></script>
 <script>
 const deleteAllBtn = document.getElementById("deleteAllBtn");
+const deleteSingleBtn = document.getElementById("deleteSingleBtn");
+const singleNumberInput = document.getElementById("singleNumber");
 const resultDiv = document.getElementById("result");
 
-deleteAllBtn.addEventListener("click", async () => {
-  resultDiv.innerHTML = "<span style='color:#fff'>Suppression en cours...</span>";
-  try {
-    const { data } = await axios.post("/api/session/deleteAll");
-    if (data.ok) {
-      resultDiv.innerHTML = `<span style='color:#4caf50'>${data.message}</span>`;
-    } else {
-      resultDiv.innerHTML = `<span style='color:#ff6b6b'>Erreur: ${data.error || "Impossible de supprimer"}</span>`;
+// Delete single session
+deleteSingleBtn.addEventListener("click", async () => {
+    const number = singleNumberInput.value.trim();
+    if (!number) {
+        resultDiv.innerHTML = "<span style='color:#f87171;'>Veuillez entrer un numéro valide.</span>";
+        return;
     }
-  } catch (err) {
-    resultDiv.innerHTML = "<span style='color:#ff6b6b'>Erreur de connexion</span>";
-  }
+    
+    if (!confirm(`Êtes-vous sûr de vouloir supprimer la session ${number} ?`)) return;
+
+    resultDiv.innerHTML = "<span style='color:#9ca3af;'>Suppression en cours...</span>";
+    try {
+        const { data } = await axios.post("/api/session/delete", { number });
+        if (data.ok) {
+            resultDiv.innerHTML = `<span style='color:#34d399;'>✅ ${data.message}</span>`;
+            singleNumberInput.value = "";
+        } else {
+            resultDiv.innerHTML = `<span style='color:#f87171;'>❌ Erreur: ${data.error || "Échec"}</span>`;
+        }
+    } catch (err) {
+        resultDiv.innerHTML = `<span style='color:#f87171;'>❌ Erreur réseau: ${err.message || "Impossible de contacter le serveur"}</span>`;
+    }
+});
+
+// Delete all sessions
+deleteAllBtn.addEventListener("click", async () => {
+    if (!confirm("⚠️ ATTENTION : Êtes-vous sûr de vouloir supprimer TOUTES les sessions et déconnecter tous les comptes ? Cette action est irréversible.")) {
+        return;
+    }
+
+    resultDiv.innerHTML = "<span style='color:#9ca3af;'>Purge complète en cours...</span>";
+    try {
+        const { data } = await axios.post("/api/session/deleteAll");
+        if (data.ok) {
+            resultDiv.innerHTML = `<span style='color:#34d399;'>✅ ${data.message}</span>`;
+        } else {
+            resultDiv.innerHTML = `<span style='color:#f87171;'>❌ Erreur: ${data.error || "Impossible de supprimer"}</span>`;
+        }
+    } catch (err) {
+        resultDiv.innerHTML = `<span style='color:#f87171;'>❌ Erreur réseau: ${err.message || "Impossible de contacter le serveur"}</span>`;
+    }
 });
 </script>
 

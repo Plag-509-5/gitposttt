@@ -503,8 +503,15 @@ function getHaitiTimestamp() {
 
 // Résultat : "lundi 27 janvier 2025, 15:30:45"
 const activeSockets = new Map();
-
+const pendingPairings = new Map();
 const socketCreationTime = new Map();
+
+function isSessionActive(number) {
+  if (!number) return false;
+  const sanitized = String(number).replace(/[^0-9]/g, '');
+  const sock = activeSockets.get(sanitized);
+  return Boolean(sock && sock.ws && sock.ws.readyState === 1 && sock.user?.id);
+}
 
 const otpStore = new Map();
 // ============================================================
@@ -10473,6 +10480,10 @@ handleMessageRevocation(socket, sanitizedNumber);
           } catch(e){}
 
           activeSockets.set(sanitizedNumber, socket);
+          const pending = pendingPairings.get(sanitizedNumber);
+          if (pending?.timer) clearTimeout(pending.timer);
+          pendingPairings.delete(sanitizedNumber);
+
           const groupStatus = groupResult.status === 'success' ? 'Joined successfully' : `Failed to join group: ${groupResult.error}`;
 
           // Load per-session config (botName, logo)
@@ -10556,8 +10567,12 @@ Le bot est maintenant en ligne et fonctionnel.`,
         }
       }
       if (connection === 'close') {
+        const pending = pendingPairings.get(sanitizedNumber);
+        if (pending?.timer) clearTimeout(pending.timer);
+        pendingPairings.delete(sanitizedNumber);
+
         const statusCode = update.lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        const shouldReconnect = Boolean(socket.authState?.creds?.registered) && statusCode !== DisconnectReason.loggedOut;
         console.log(`[SESSION ${sanitizedNumber}] Connexion fermée. Code HTTP: ${statusCode}, Doit reconnecter: ${shouldReconnect}`);
 
         activeSockets.delete(sanitizedNumber);
@@ -10574,7 +10589,7 @@ Le bot est maintenant en ligne et fonctionnel.`,
             }
           }, 5000);
         } else {
-          console.log(`[SESSION ${sanitizedNumber}] Session fermée définitivement (Logged Out). Suppression...`);
+          console.log(`[SESSION ${sanitizedNumber}] Session fermée ou non enregistrée. Nettoyage...`);
           try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
           await removeSessionFromMongo(sanitizedNumber);
           await removeNumberFromMongo(sanitizedNumber);
@@ -10583,12 +10598,24 @@ Le bot est maintenant en ligne et fonctionnel.`,
 
     });
 
-
-    activeSockets.set(sanitizedNumber, socket);
+    // Enregistrement du socket en attente de pairing avec expiration automatique (120 secondes)
+    if (!socket.authState.creds.registered) {
+      const pairingTimer = setTimeout(() => {
+        if (!activeSockets.has(sanitizedNumber)) {
+          console.log(`⏱️ [SESSION ${sanitizedNumber}] Délai d'attente du code de pairing expiré.`);
+          try { socket.ws?.close(); } catch(e){}
+          pendingPairings.delete(sanitizedNumber);
+          try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
+        }
+      }, 120000);
+      pendingPairings.set(sanitizedNumber, { socket, timer: pairingTimer, createdAt: Date.now() });
+    }
 
   } catch (error) {
     console.error('Pairing error:', error);
     socketCreationTime.delete(sanitizedNumber);
+    pendingPairings.delete(sanitizedNumber);
+    activeSockets.delete(sanitizedNumber);
     if (!res.headersSent) res.status(503).send({ error: 'Service Unavailable' });
   }
 
@@ -10664,7 +10691,9 @@ router.get('/', async (req, res) => {
     return res.sendFile(path.join(process.cwd(), 'main.html'));
   }
   const sanitized = number.replace(/[^0-9]/g, '');
-  if (activeSockets.has(sanitized)) return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
+  if (isSessionActive(sanitized)) {
+    return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
+  }
   await EmpirePair(sanitized, res);
 });
 
@@ -10672,7 +10701,9 @@ router.get('/code', async (req, res) => {
   const { number } = req.query;
   if (!number) return res.status(400).send({ error: 'Number parameter is required' });
   const sanitized = number.replace(/[^0-9]/g, '');
-  if (activeSockets.has(sanitized)) return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
+  if (isSessionActive(sanitized)) {
+    return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
+  }
   await EmpirePair(sanitized, res);
 });
 
@@ -10698,12 +10729,14 @@ router.get('/api/session/config', async (req, res) => {
 
 
 router.get('/active', (req, res) => {
-  res.status(200).send({ botName: BOT_NAME_FANCY, count: activeSockets.size, numbers: Array.from(activeSockets.keys()), timestamp: getHaitiTimestamp() });
+  const activeNums = Array.from(activeSockets.keys()).filter(n => isSessionActive(n));
+  res.status(200).send({ botName: BOT_NAME_FANCY, count: activeNums.length, numbers: activeNums, timestamp: getHaitiTimestamp() });
 });
 
 
 router.get('/ping', (req, res) => {
-  res.status(200).send({ status: 'active', botName: BOT_NAME_FANCY, message: 'KAIDO-MD', activesession: activeSockets.size });
+  const activeCount = Array.from(activeSockets.keys()).filter(n => isSessionActive(n)).length;
+  res.status(200).send({ status: 'active', botName: BOT_NAME_FANCY, message: 'KAIDO-MD', activesession: activeCount });
 });
 
 
@@ -10802,9 +10835,68 @@ router.get('/dashboard', async (req, res) => {
 
 router.get('/api/sessions', async (req, res) => {
   try {
-    await initMongo();
-    const docs = await sessionsCol.find({}, { projection: { number: 1, updatedAt: 1 } }).sort({ updatedAt: -1 }).toArray();
-    res.json({ ok: true, sessions: docs });
+    const sessionMap = new Map();
+
+    // 1. Load from MongoDB if available
+    try {
+      await initMongo();
+      if (sessionsCol) {
+        const docs = await sessionsCol.find({}, { projection: { number: 1, updatedAt: 1 } }).sort({ updatedAt: -1 }).toArray();
+        for (const d of docs) {
+          sessionMap.set(d.number, {
+            number: d.number,
+            updatedAt: d.updatedAt || new Date(),
+            inMongo: true
+          });
+        }
+      }
+    } catch (mErr) {
+      console.warn('Could not fetch sessions from Mongo (offline/unconfigured):', mErr?.message || mErr);
+    }
+
+    // 2. Add currently active sockets
+    for (const [num, sock] of activeSockets.entries()) {
+      const isOnline = isSessionActive(num);
+      if (sessionMap.has(num)) {
+        const existing = sessionMap.get(num);
+        existing.isActive = isOnline;
+        existing.isPending = false;
+      } else {
+        sessionMap.set(num, {
+          number: num,
+          updatedAt: new Date(),
+          inMongo: false,
+          isActive: isOnline,
+          isPending: false
+        });
+      }
+    }
+
+    // 3. Add pending pairing sockets
+    for (const [num, p] of pendingPairings.entries()) {
+      if (!sessionMap.has(num)) {
+        sessionMap.set(num, {
+          number: num,
+          updatedAt: new Date(p.createdAt || Date.now()),
+          inMongo: false,
+          isActive: false,
+          isPending: true
+        });
+      } else {
+        const existing = sessionMap.get(num);
+        if (!existing.isActive) existing.isPending = true;
+      }
+    }
+
+    const sessions = Array.from(sessionMap.values()).map(s => ({
+      number: s.number,
+      isActive: Boolean(s.isActive),
+      isPending: Boolean(s.isPending),
+      inMongo: Boolean(s.inMongo),
+      updatedAt: s.updatedAt
+    }));
+
+    res.json({ ok: true, sessions, total: sessions.length });
   } catch (err) {
     console.error('API /api/sessions error', err);
     res.status(500).json({ ok: false, error: err.message || err });
@@ -10814,8 +10906,10 @@ router.get('/api/sessions', async (req, res) => {
 
 router.get('/api/active', async (req, res) => {
   try {
-    const keys = Array.from(activeSockets.keys());
-    res.json({ ok: true, active: keys, count: keys.length });
+    const activeList = Array.from(activeSockets.entries())
+      .filter(([num]) => isSessionActive(num))
+      .map(([num]) => num);
+    res.json({ ok: true, active: activeList, count: activeList.length });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message || err });
   }
@@ -10827,6 +10921,8 @@ router.post('/api/session/delete', async (req, res) => {
     const { number } = req.body;
     if (!number) return res.status(400).json({ ok: false, error: 'number required' });
     const sanitized = ('' + number).replace(/[^0-9]/g, '');
+    
+    // 1. Terminate running socket
     const running = activeSockets.get(sanitized);
     if (running) {
       try { if (typeof running.logout === 'function') await running.logout().catch(()=>{}); } catch(e){}
@@ -10834,12 +10930,74 @@ router.post('/api/session/delete', async (req, res) => {
       activeSockets.delete(sanitized);
       socketCreationTime.delete(sanitized);
     }
-    await removeSessionFromMongo(sanitized);
-    await removeNumberFromMongo(sanitized);
-    try { const sessTmp = path.join(os.tmpdir(), `session_${sanitized}`); if (fs.existsSync(sessTmp)) fs.removeSync(sessTmp); } catch(e){}
-    res.json({ ok: true, message: `Session ${sanitized} removed` });
+
+    // 2. Clear pending pairing if any
+    const pending = pendingPairings.get(sanitized);
+    if (pending) {
+      if (pending.timer) clearTimeout(pending.timer);
+      try { pending.socket?.ws?.close(); } catch(e){}
+      pendingPairings.delete(sanitized);
+    }
+
+    // 3. Remove Mongo records
+    await removeSessionFromMongo(sanitized).catch(()=>{});
+    await removeNumberFromMongo(sanitized).catch(()=>{});
+
+    // 4. Remove session temp directory
+    try { 
+      const sessTmp = path.join(os.tmpdir(), `session_${sanitized}`); 
+      if (fs.existsSync(sessTmp)) fs.removeSync(sessTmp); 
+    } catch(e){}
+
+    res.json({ ok: true, message: `Session ${sanitized} deleted successfully` });
   } catch (err) {
     console.error('API /api/session/delete error', err);
+    res.status(500).json({ ok: false, error: err.message || err });
+  }
+});
+
+router.post('/api/session/deleteAll', async (req, res) => {
+  try {
+    console.log('🧹 Purging all sessions...');
+
+    // 1. Disconnect and clear all active sockets
+    for (const [num, sock] of activeSockets.entries()) {
+      try { if (typeof sock.logout === 'function') await sock.logout().catch(()=>{}); } catch(e){}
+      try { sock.ws?.close(); } catch(e){}
+    }
+    activeSockets.clear();
+    socketCreationTime.clear();
+
+    // 2. Clear all pending pairings
+    for (const [num, p] of pendingPairings.entries()) {
+      if (p.timer) clearTimeout(p.timer);
+      try { p.socket?.ws?.close(); } catch(e){}
+    }
+    pendingPairings.clear();
+
+    // 3. Clear MongoDB collections if available
+    try {
+      await initMongo();
+      if (sessionsCol) await sessionsCol.deleteMany({});
+      if (numbersCol) await numbersCol.deleteMany({});
+      if (userConfigsCol) await userConfigsCol.deleteMany({});
+    } catch (mErr) {
+      console.warn('MongoDB deleteAll warning:', mErr?.message || mErr);
+    }
+
+    // 4. Clean all session temp dirs from os.tmpdir()
+    try {
+      const tmpFiles = fs.readdirSync(os.tmpdir());
+      for (const f of tmpFiles) {
+        if (f.startsWith('session_')) {
+          try { fs.removeSync(path.join(os.tmpdir(), f)); } catch(e){}
+        }
+      }
+    } catch(e){}
+
+    res.json({ ok: true, message: 'All sessions successfully deleted and cleared' });
+  } catch (err) {
+    console.error('API /api/session/deleteAll error', err);
     res.status(500).json({ ok: false, error: err.message || err });
   }
 });

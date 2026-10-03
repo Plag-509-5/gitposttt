@@ -1,269 +1,533 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gestion des Sessions - KAIDO-MD</title>
+    <title>Gestion des Sessions — KAIDO-MD</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 20px;
+        :root {
+            --bg-primary: #0a0e17;
+            --card-bg: rgba(17, 24, 39, 0.85);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --card-hover-border: rgba(99, 102, 241, 0.4);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --accent-primary: #6366f1;
+            --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
         }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.12) 0%, transparent 40%),
+                        radial-gradient(circle at 90% 80%, rgba(236, 72, 153, 0.1) 0%, transparent 40%),
+                        var(--bg-primary);
+            min-height: 100vh;
+            color: var(--text-main);
+            padding: 2rem 1.5rem;
+        }
+
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            background: white;
-            border-radius: 20px;
-            padding: 2rem;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            padding: 2.2rem;
+            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.5);
         }
-        h1 {
-            color: #667eea;
+
+        .top-nav {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-muted);
+            text-decoration: none;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+
+        .back-link:hover {
+            color: #fff;
+        }
+
+        .header-title {
+            display: flex;
+            align-items: center;
+            gap: 12px;
             margin-bottom: 1.5rem;
         }
-        .back-link {
-            display: inline-block;
-            margin-bottom: 1rem;
-            color: #667eea;
-            text-decoration: none;
+
+        .header-title h1 {
+            font-size: 1.6rem;
+            font-weight: 800;
+            background: linear-gradient(135deg, #fff 40%, #c7d2fe 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
-        .stats {
+
+        .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
+            gap: 1.2rem;
             margin-bottom: 2rem;
         }
+
         .stat-box {
-            background: #f8f9fa;
-            padding: 1rem;
-            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.2rem;
             text-align: center;
+            transition: transform 0.2s;
         }
+
+        .stat-box:hover {
+            transform: translateY(-2px);
+            border-color: var(--card-hover-border);
+        }
+
         .stat-box .label {
-            color: #666;
-            font-size: 0.9rem;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+            font-weight: 600;
+            margin-bottom: 0.4rem;
         }
+
         .stat-box .value {
             font-size: 2rem;
-            font-weight: bold;
-            color: #667eea;
+            font-weight: 800;
+            color: #fff;
         }
+
+        .toolbar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .search-box {
+            position: relative;
+            flex: 1;
+            max-width: 320px;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 10px 14px 10px 38px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            color: #fff;
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        .search-box input:focus {
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 16px;
+            border-radius: 10px;
+            font-size: 0.88rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: none;
+            text-decoration: none;
+        }
+
+        .btn-refresh {
+            background: rgba(255, 255, 255, 0.06);
+            color: #fff;
+            border: 1px solid var(--card-border);
+        }
+
+        .btn-refresh:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+
+        .btn-primary {
+            background: var(--accent-gradient);
+            color: #fff;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+        }
+
+        .table-container {
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            overflow: hidden;
+            background: rgba(0, 0, 0, 0.2);
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
-        }
-        th, td {
-            padding: 1rem;
             text-align: left;
-            border-bottom: 1px solid #ddd;
         }
+
         th {
-            background: #f8f9fa;
-            color: #667eea;
+            background: rgba(255, 255, 255, 0.04);
+            padding: 1rem 1.2rem;
+            font-size: 0.82rem;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+            font-weight: 600;
+            border-bottom: 1px solid var(--card-border);
         }
+
+        td {
+            padding: 1rem 1.2rem;
+            font-size: 0.9rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            vertical-align: middle;
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        tr:hover td {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .phone-cell {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 600;
+            color: #fff;
+        }
+
         .status-badge {
-            padding: 3px 8px;
-            border-radius: 15px;
-            font-size: 0.8rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 9999px;
+            font-size: 0.78rem;
             font-weight: 600;
         }
+
         .status-active {
-            background: #d4edda;
-            color: #155724;
+            background: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.3);
         }
+
+        .status-pending {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+
         .status-inactive {
-            background: #f8d7da;
-            color: #721c24;
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
         }
-        .btn-delete {
-            background: #dc3545;
-            color: white;
-            border: none;
-            padding: 5px 10px;
-            border-radius: 5px;
-            cursor: pointer;
-            margin-right: 5px;
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
         }
-        .btn-config {
-            background: #28a745;
-            color: white;
-            border: none;
-            padding: 5px 10px;
-            border-radius: 5px;
-            cursor: pointer;
-            text-decoration: none;
-            font-size: 0.9rem;
-        }
+        .status-active .status-dot { background: #10b981; }
+        .status-pending .status-dot { background: #f59e0b; }
+        .status-inactive .status-dot { background: #ef4444; }
+
         .action-buttons {
             display: flex;
-            gap: 5px;
+            gap: 8px;
+            align-items: center;
             flex-wrap: wrap;
         }
-        .refresh-btn {
-            background: #667eea;
-            color: white;
-            border: none;
-            padding: 0.5rem 1rem;
-            border-radius: 5px;
+
+        .btn-sm {
+            padding: 5px 10px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-decoration: none;
             cursor: pointer;
-            margin-bottom: 1rem;
+            border: none;
+            transition: all 0.2s;
+        }
+
+        .btn-config {
+            background: rgba(99, 102, 241, 0.15);
+            color: #a5b4fc;
+            border: 1px solid rgba(99, 102, 241, 0.3);
+        }
+        .btn-config:hover {
+            background: #6366f1;
+            color: #fff;
+        }
+
+        .btn-delete {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+        .btn-delete:hover {
+            background: #ef4444;
+            color: #fff;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-muted);
+        }
+        .empty-icon {
+            font-size: 2.5rem;
+            margin-bottom: 0.8rem;
         }
     </style>
 </head>
 <body>
+
     <div class="container">
-        <a href="/dashboard" class="back-link">← Retour au Dashboard</a>
-        <h1>📱 Gestion des Sessions</h1>
-        
-        <button class="refresh-btn" onclick="loadData()">🔄 Actualiser</button>
-        
-        <div class="stats">
+        <div class="top-nav">
+            <a href="/dashboard" class="back-link">← Retour au Dashboard</a>
+            <div style="display: flex; gap: 10px;">
+                <button class="btn btn-refresh" onclick="loadData()">🔄 Actualiser</button>
+                <a href="/pair" class="btn btn-primary">➕ Appairer</a>
+            </div>
+        </div>
+
+        <div class="header-title">
+            <span style="font-size: 1.8rem;">📱</span>
+            <h1>Gestion des Sessions WhatsApp</h1>
+        </div>
+
+        <!-- Metric Boxes -->
+        <div class="stats-grid">
             <div class="stat-box">
                 <div class="label">Total Sessions</div>
                 <div class="value" id="totalSessions">0</div>
             </div>
             <div class="stat-box">
-                <div class="label">Sessions Actives</div>
-                <div class="value" id="activeSessions">0</div>
+                <div class="label">Sessions En Ligne</div>
+                <div class="value" style="color: #34d399;" id="activeSessions">0</div>
             </div>
             <div class="stat-box">
-                <div class="label">Sessions Inactives</div>
-                <div class="value" id="inactiveSessions">0</div>
+                <div class="label">Sessions Hors Ligne</div>
+                <div class="value" style="color: #f87171;" id="inactiveSessions">0</div>
             </div>
         </div>
-        
-        <table>
-            <thead>
-                <tr>
-                    <th>Numéro</th>
-                    <th>Statut</th>
-                    <th>Dernière mise à jour</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody id="sessionsList"></tbody>
-        </table>
+
+        <!-- Toolbar -->
+        <div class="toolbar">
+            <div class="search-box">
+                <span class="search-icon">🔍</span>
+                <input type="text" id="searchInput" placeholder="Filtrer par numéro..." onkeyup="filterSessions()">
+            </div>
+            <a href="/delete" style="color: #f87171; font-size: 0.88rem; font-weight: 600; text-decoration: none;">🗑️ Tout supprimer</a>
+        </div>
+
+        <!-- Sessions Table -->
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Numéro de Téléphone</th>
+                        <th>Statut Connexion</th>
+                        <th>Dernière Mise à Jour</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="sessionsList">
+                    <tr>
+                        <td colspan="4" class="empty-state">
+                            <div class="empty-icon">⏳</div>
+                            <div>Chargement des sessions...</div>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 
     <script>
-        let activeSet = new Set();
+        let allSessions = [];
 
-        async function loadActiveSessions() {
-            try {
-                const response = await fetch('/api/active');
-                const data = await response.json();
-                if (data.ok) {
-                    activeSet = new Set(data.active);
-                    document.getElementById('activeSessions').textContent = data.count;
-                }
-            } catch (error) {
-                console.error('Error loading active sessions:', error);
-            }
-        }
-
-        async function loadSessions() {
+        async function loadData() {
             try {
                 const response = await fetch('/api/sessions');
                 const data = await response.json();
                 
                 if (data.ok) {
-                    const tbody = document.getElementById('sessionsList');
-                    tbody.innerHTML = '';
-                    
-                    document.getElementById('totalSessions').textContent = data.sessions.length;
-                    
-                    data.sessions.forEach(session => {
-                        const row = tbody.insertRow();
-                        const isActive = activeSet.has(session.number);
-                        
-                        // Number cell
-                        const numCell = row.insertCell();
-                        numCell.textContent = session.number;
-                        
-                        // Status cell
-                        const statusCell = row.insertCell();
-                        const statusBadge = document.createElement('span');
-                        statusBadge.className = `status-badge ${isActive ? 'status-active' : 'status-inactive'}`;
-                        statusBadge.textContent = isActive ? 'ACTIF' : 'INACTIF';
-                        statusCell.appendChild(statusBadge);
-                        
-                        // Updated at cell
-                        const dateCell = row.insertCell();
-                        if (session.updatedAt) {
-                            dateCell.textContent = new Date(session.updatedAt).toLocaleString();
-                        } else {
-                            dateCell.textContent = 'Inconnue';
-                        }
-                        
-                        // Actions cell
-                        const actionCell = row.insertCell();
-                        const actionDiv = document.createElement('div');
-                        actionDiv.className = 'action-buttons';
-                        
-                        // Config button
-                        const configBtn = document.createElement('a');
-                        configBtn.href = `/dashboard/session-config.html?number=${session.number}`;
-                        configBtn.className = 'btn-config';
-                        configBtn.textContent = '⚙️ Config';
-                        actionDiv.appendChild(configBtn);
-                        
-                        // About button
-                        const aboutBtn = document.createElement('a');
-                        aboutBtn.href = `/dashboard/session-about.html?number=${session.number}`;
-                        aboutBtn.className = 'btn-config';
-                        aboutBtn.textContent = 'ℹ️ About';
-                        actionDiv.appendChild(aboutBtn);
-                        
-                        // Delete button
-                        const deleteBtn = document.createElement('button');
-                        deleteBtn.className = 'btn-delete';
-                        deleteBtn.textContent = '🗑️ Supprimer';
-                        deleteBtn.onclick = () => deleteSession(session.number);
-                        actionDiv.appendChild(deleteBtn);
-                        
-                        actionCell.appendChild(actionDiv);
-                    });
-                    
-                    document.getElementById('inactiveSessions').textContent = 
-                        data.sessions.length - activeSet.size;
+                    allSessions = data.sessions || [];
+                    renderSessions(allSessions);
+                    updateCounters(allSessions);
                 }
             } catch (error) {
-                alert('Erreur de chargement: ' + error.message);
+                console.error('Error loading sessions:', error);
+                const tbody = document.getElementById('sessionsList');
+                tbody.innerHTML = `<tr><td colspan="4" class="empty-state" style="color: #f87171;"><div class="empty-icon">❌</div><div>Erreur de chargement: ${error.message}</div></td></tr>`;
             }
         }
 
+        function updateCounters(sessions) {
+            const total = sessions.length;
+            const active = sessions.filter(s => s.isActive).length;
+            const inactive = total - active;
+
+            document.getElementById('totalSessions').textContent = total;
+            document.getElementById('activeSessions').textContent = active;
+            document.getElementById('inactiveSessions').textContent = inactive;
+        }
+
+        function renderSessions(sessions) {
+            const tbody = document.getElementById('sessionsList');
+            tbody.innerHTML = '';
+
+            if (sessions.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="empty-state">
+                            <div class="empty-icon">📭</div>
+                            <div>Aucune session enregistrée pour le moment.</div>
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            sessions.forEach(session => {
+                const tr = document.createElement('tr');
+
+                // Numéro
+                const numTd = document.createElement('td');
+                numTd.className = 'phone-cell';
+                numTd.textContent = `+${session.number}`;
+                tr.appendChild(numTd);
+
+                // Statut
+                const statusTd = document.createElement('td');
+                const badge = document.createElement('span');
+                if (session.isActive) {
+                    badge.className = 'status-badge status-active';
+                    badge.innerHTML = '<span class="status-dot"></span> EN LIGNE';
+                } else if (session.isPending) {
+                    badge.className = 'status-badge status-pending';
+                    badge.innerHTML = '<span class="status-dot"></span> EN ATTENTE';
+                } else {
+                    badge.className = 'status-badge status-inactive';
+                    badge.innerHTML = '<span class="status-dot"></span> HORS LIGNE';
+                }
+                statusTd.appendChild(badge);
+                tr.appendChild(statusTd);
+
+                // Date
+                const dateTd = document.createElement('td');
+                dateTd.style.color = '#9ca3af';
+                dateTd.style.fontSize = '0.85rem';
+                dateTd.textContent = session.updatedAt ? new Date(session.updatedAt).toLocaleString('fr-FR') : 'Inconnue';
+                tr.appendChild(dateTd);
+
+                // Actions
+                const actionsTd = document.createElement('td');
+                const actionsDiv = document.createElement('div');
+                actionsDiv.className = 'action-buttons';
+
+                // Config
+                const configLink = document.createElement('a');
+                configLink.href = `/dashboard/session-config.html?number=${session.number}`;
+                configLink.className = 'btn-sm btn-config';
+                configLink.textContent = '⚙️ Config';
+                actionsDiv.appendChild(configLink);
+
+                // Delete
+                const delBtn = document.createElement('button');
+                delBtn.className = 'btn-sm btn-delete';
+                delBtn.textContent = '🗑️ Supprimer';
+                delBtn.onclick = () => deleteSession(session.number);
+                actionsDiv.appendChild(delBtn);
+
+                actionsTd.appendChild(actionsDiv);
+                tr.appendChild(actionsTd);
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        function filterSessions() {
+            const query = document.getElementById('searchInput').value.toLowerCase().trim();
+            const filtered = allSessions.filter(s => String(s.number).includes(query));
+            renderSessions(filtered);
+        }
+
         async function deleteSession(number) {
-            if (!confirm(`Supprimer la session ${number} ?`)) return;
-            
+            if (!confirm(`Confirmer la suppression complète de la session ${number} ?`)) return;
+
             try {
                 const response = await fetch('/api/session/delete', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ number })
                 });
-                
+
                 const data = await response.json();
                 if (data.ok) {
-                    alert('Session supprimée avec succès');
-                    loadData();
+                    await loadData();
                 } else {
-                    alert('Erreur: ' + data.error);
+                    alert('Erreur: ' + (data.error || 'Impossible de supprimer'));
                 }
-            } catch (error) {
-                alert('Erreur: ' + error.message);
+            } catch (err) {
+                alert('Erreur réseau: ' + err.message);
             }
         }
 
-        async function loadData() {
-            await loadActiveSessions();
-            await loadSessions();
-        }
-
         loadData();
-        setInterval(loadActiveSessions, 5000); // Mise à jour toutes les 5 secondes
+        setInterval(loadData, 8000);
     </script>
 </body>
 </html>

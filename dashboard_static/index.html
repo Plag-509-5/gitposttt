@@ -1,296 +1,719 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="fr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KAIDO-MD Dashboard</title>
+    <title>KAIDO-MD — Centre de Contrôle & Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            color: #333;
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --card-bg: rgba(17, 24, 39, 0.75);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --card-hover-border: rgba(99, 102, 241, 0.4);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --accent-primary: #6366f1;
+            --accent-secondary: #8b5cf6;
+            --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --glow-indigo: rgba(99, 102, 241, 0.25);
         }
-        .header {
-            background: rgba(255, 255, 255, 0.95);
-            padding: 1.5rem;
-            box-shadow: 0 2px 20px rgba(0,0,0,0.1);
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.12) 0%, transparent 40%),
+                        radial-gradient(circle at 90% 80%, rgba(236, 72, 153, 0.1) 0%, transparent 40%),
+                        var(--bg-primary);
+            min-height: 100vh;
+            color: var(--text-main);
+            overflow-x: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Glassmorphism Header */
+        header {
+            background: rgba(17, 24, 39, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--card-border);
             position: sticky;
             top: 0;
             z-index: 100;
+            padding: 1.1rem 2rem;
         }
-        .header h1 {
-            color: #667eea;
-            font-size: 2rem;
-            margin-bottom: 0.5rem;
+
+        .header-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 1rem;
         }
-        .header p { color: #666; }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            text-decoration: none;
+            color: #fff;
+        }
+
+        .brand-icon {
+            width: 44px;
+            height: 44px;
+            border-radius: 12px;
+            background: var(--accent-gradient);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            box-shadow: 0 4px 15px var(--glow-indigo);
+        }
+
+        .brand-text h1 {
+            font-size: 1.35rem;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, #fff 40%, #c7d2fe 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .brand-text p {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .pulse-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            background: rgba(16, 185, 129, 0.12);
+            color: #34d399;
+            border: 1px solid rgba(16, 185, 129, 0.25);
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            box-shadow: 0 0 10px #10b981;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 8px rgba(16, 185, 129, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(16, 185, 129, 0); }
+        }
+
+        .btn-action {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            border: none;
+        }
+
+        .btn-primary {
+            background: var(--accent-gradient);
+            color: #fff;
+            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
+        }
+
+        .btn-danger {
+            background: rgba(239, 68, 68, 0.15);
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .btn-danger:hover {
+            background: #ef4444;
+            color: #fff;
+            transform: translateY(-2px);
+        }
+
+        /* Container */
         .container {
             max-width: 1400px;
             margin: 2rem auto;
             padding: 0 1.5rem;
+            flex: 1;
+            width: 100%;
         }
+
+        /* Stats Grid */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 1.5rem;
-            margin-bottom: 2.5rem;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1.25rem;
+            margin-bottom: 2rem;
         }
+
         .stat-card {
-            background: white;
-            border-radius: 15px;
-            padding: 1.5rem;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-            transition: transform 0.3s;
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 1.4rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            position: relative;
+            overflow: hidden;
         }
-        .stat-card:hover { transform: translateY(-5px); }
-        .stat-card h3 {
-            color: #667eea;
-            font-size: 1rem;
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 3px;
+            background: var(--accent-gradient);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-4px);
+            border-color: var(--card-hover-border);
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+        }
+
+        .stat-card:hover::before {
+            opacity: 1;
+        }
+
+        .stat-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.8rem;
+        }
+
+        .stat-header h3 {
+            font-size: 0.85rem;
             text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 0.5rem;
+            letter-spacing: 0.8px;
+            color: var(--text-muted);
+            font-weight: 600;
         }
-        .stat-card .number {
-            font-size: 2.5rem;
-            font-weight: bold;
-            color: #333;
+
+        .stat-icon {
+            font-size: 1.3rem;
+            background: rgba(255, 255, 255, 0.05);
+            padding: 8px;
+            border-radius: 10px;
         }
+
+        .stat-value {
+            font-size: 2.2rem;
+            font-weight: 800;
+            letter-spacing: -1px;
+            color: #fff;
+        }
+
+        .stat-footer {
+            margin-top: 0.4rem;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+        }
+
+        /* Modules Grid */
         .modules-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
             gap: 1.5rem;
-            margin-bottom: 2.5rem;
+            margin-bottom: 2rem;
         }
-        .module {
-            background: white;
-            border-radius: 15px;
+
+        .module-card {
+            background: var(--card-bg);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--card-border);
+            border-radius: 18px;
             padding: 1.5rem;
-            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-        }
-        .module h2 {
-            color: #764ba2;
-            margin-bottom: 1rem;
-            padding-bottom: 0.5rem;
-            border-bottom: 2px solid #f0f0f0;
-        }
-        .module-links {
             display: flex;
             flex-direction: column;
-            gap: 0.8rem;
+            transition: all 0.3s ease;
         }
-        .module-links a {
+
+        .module-card:hover {
+            border-color: var(--card-hover-border);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+        }
+
+        .module-title {
             display: flex;
             align-items: center;
             gap: 10px;
-            padding: 0.8rem 1rem;
-            background: #f8f9fa;
-            border-radius: 10px;
-            color: #555;
+            margin-bottom: 1.2rem;
+            padding-bottom: 0.8rem;
+            border-bottom: 1px solid var(--card-border);
+        }
+
+        .module-title h2 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .module-links {
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+            flex: 1;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.75rem 1rem;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.04);
+            border-radius: 12px;
+            color: var(--text-main);
             text-decoration: none;
-            transition: all 0.3s;
-            border-left: 4px solid transparent;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
         }
-        .module-links a:hover {
-            background: #e9ecef;
-            border-left-color: #667eea;
-            transform: translateX(5px);
+
+        .nav-item-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
-        .module-links a i {
-            font-size: 1.2rem;
-            color: #667eea;
+
+        .nav-item-icon {
+            font-size: 1.1rem;
         }
-        .status-badge {
-            padding: 0.25rem 0.5rem;
-            border-radius: 5px;
+
+        .nav-item:hover {
+            background: rgba(99, 102, 241, 0.12);
+            border-color: rgba(99, 102, 241, 0.3);
+            transform: translateX(4px);
+            color: #fff;
+        }
+
+        .nav-arrow {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+            transition: transform 0.2s;
+        }
+
+        .nav-item:hover .nav-arrow {
+            transform: translateX(3px);
+            color: var(--accent-primary);
+        }
+
+        /* Console Box */
+        .terminal-box {
+            background: #06090e;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 16px;
+            padding: 1.2rem;
+            font-family: 'JetBrains Mono', monospace;
+            box-shadow: inset 0 2px 10px rgba(0,0,0,0.5);
+            margin-bottom: 2rem;
+        }
+
+        .terminal-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.8rem;
+            padding-bottom: 0.6rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            color: var(--text-muted);
             font-size: 0.8rem;
-            font-weight: 600;
         }
-        .status-online { background: #d4edda; color: #155724; }
-        .status-offline { background: #f8d7da; color: #721c24; }
-        .btn {
-            padding: 0.5rem 1rem;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 600;
-            transition: all 0.3s;
+
+        .terminal-dots {
+            display: flex;
+            gap: 6px;
         }
-        .btn-primary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
+
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
         }
-        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(102,126,234,0.4); }
-        .btn-danger {
-            background: #dc3545;
-            color: white;
+        .dot-red { background: #ef4444; }
+        .dot-yellow { background: #f59e0b; }
+        .dot-green { background: #10b981; }
+
+        .terminal-body {
+            height: 140px;
+            overflow-y: auto;
+            font-size: 0.82rem;
+            color: #a7f3d0;
+            line-height: 1.6;
         }
-        .btn-danger:hover { background: #c82333; }
+
+        .terminal-body div {
+            margin-bottom: 4px;
+        }
+
+        .terminal-body::-webkit-scrollbar {
+            width: 6px;
+        }
+        .terminal-body::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+        }
+
+        footer {
+            border-top: 1px solid var(--card-border);
+            padding: 1.5rem;
+            text-align: center;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            background: rgba(10, 14, 23, 0.95);
+        }
+
+        @media (max-width: 768px) {
+            header { padding: 1rem; }
+            .container { padding: 0 1rem; margin: 1rem auto; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 0.8rem; }
+            .modules-grid { grid-template-columns: 1fr; }
+        }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>🤖 KAIDO-MD Dashboard</h1>
-        <p id="botStatus">Loading bot status...</p>
-    </div>
-    
+
+    <!-- Header Navigation -->
+    <header>
+        <div class="header-content">
+            <a href="/dashboard" class="brand">
+                <div class="brand-icon">⚡</div>
+                <div class="brand-text">
+                    <h1>KAIDO-MD</h1>
+                    <p>Panneau d'administration & Gestion Multi-Sessions</p>
+                </div>
+            </a>
+            <div class="header-actions">
+                <div class="pulse-badge" id="statusBadgeContainer">
+                    <span class="pulse-dot" id="statusPulseDot"></span>
+                    <span id="botStatusText">Système En Ligne</span>
+                </div>
+                <a href="/pair" class="btn-action btn-primary">➕ Nouvelle Session</a>
+                <a href="/delete" class="btn-action btn-danger">🗑️ Purger</a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
     <div class="container">
+
+        <!-- Top Metrics Cards -->
         <div class="stats-grid">
             <div class="stat-card">
-                <h3>Sessions Actives</h3>
-                <div class="number" id="activeCount">0</div>
-            </div>
-            <div class="stat-card">
-                <h3>Newsletters</h3>
-                <div class="number" id="newsletterCount">0</div>
-            </div>
-            <div class="stat-card">
-                <h3>Administrateurs</h3>
-                <div class="number" id="adminCount">0</div>
-            </div>
-            <div class="stat-card">
-                <h3>Statut du Bot</h3>
-                <div class="number">
-                    <span class="status-badge status-online" id="botStatusBadge">Online</span>
+                <div class="stat-header">
+                    <h3>Sessions Connectées</h3>
+                    <span class="stat-icon">🟢</span>
                 </div>
+                <div class="stat-value" id="activeCount">0</div>
+                <div class="stat-footer" id="activeDetails">Sockets WhatsApp actifs</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-header">
+                    <h3>Sessions Enregistrées</h3>
+                    <span class="stat-icon">💾</span>
+                </div>
+                <div class="stat-value" id="totalSessionsCount">0</div>
+                <div class="stat-footer">Base de données & cache</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-header">
+                    <h3>Newsletters Actives</h3>
+                    <span class="stat-icon">📬</span>
+                </div>
+                <div class="stat-value" id="newsletterCount">0</div>
+                <div class="stat-footer">Chaînes WhatsApp abonnées</div>
+            </div>
+
+            <div class="stat-card">
+                <div class="stat-header">
+                    <h3>Admins Autorisés</h3>
+                    <span class="stat-icon">👑</span>
+                </div>
+                <div class="stat-value" id="adminCount">0</div>
+                <div class="stat-footer">Droits super-utilisateurs</div>
             </div>
         </div>
 
+        <!-- Modules Grid -->
         <div class="modules-grid">
-            <!-- Module Newsletter -->
-            <div class="module">
-                <h2>📬 Newsletters</h2>
+
+            <!-- Module Sessions -->
+            <div class="module-card">
+                <div class="module-title">
+                    <span style="font-size: 1.4rem;">📱</span>
+                    <h2>Gestion des Sessions</h2>
+                </div>
                 <div class="module-links">
-                    <a href="/dashboard/newsletters.html">
-                        <i>📋</i> Gérer les newsletters
+                    <a href="/dashboard/sessions.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">📋</span>
+                            <span>Liste complète des sessions</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
                     </a>
-                    <a href="/dashboard/newsletter-add.html">
-                        <i>➕</i> Ajouter une newsletter
+                    <a href="/pair" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🔗</span>
+                            <span>Appairer un nouveau numéro</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
                     </a>
-                    <a href="/dashboard/newsletter-remove.html">
-                        <i>🗑️</i> Supprimer une newsletter
+                    <a href="/dashboard/session-config.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">⚙️</span>
+                            <span>Personnalisation & Préfixes</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
                     </a>
-                    <a href="/api/newsletters" target="_blank">
-                        <i>🔗</i> API List (JSON)
+                    <a href="/delete" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🗑️</span>
+                            <span>Purger toutes les sessions</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
+                    </a>
+                </div>
+            </div>
+
+            <!-- Module Newsletters -->
+            <div class="module-card">
+                <div class="module-title">
+                    <span style="font-size: 1.4rem;">📬</span>
+                    <h2>Newsletters & Chaînes</h2>
+                </div>
+                <div class="module-links">
+                    <a href="/dashboard/newsletters.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">📋</span>
+                            <span>Gérer les newsletters</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
+                    </a>
+                    <a href="/dashboard/newsletter-add.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">➕</span>
+                            <span>Ajouter une newsletter</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
+                    </a>
+                    <a href="/dashboard/newsletter-remove.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🗑️</span>
+                            <span>Supprimer une newsletter</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
+                    </a>
+                    <a href="/api/newsletters" target="_blank" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🌐</span>
+                            <span>API JSON Newsletters</span>
+                        </div>
+                        <span class="nav-arrow">↗</span>
                     </a>
                 </div>
             </div>
 
             <!-- Module Administrateurs -->
-            <div class="module">
-                <h2>👑 Administrateurs</h2>
-                <div class="module-links">
-                    <a href="/dashboard/admins.html">
-                        <i>📋</i> Gérer les admins
-                    </a>
-                    <a href="/dashboard/admin-add.html">
-                        <i>➕</i> Ajouter un admin
-                    </a>
-                    <a href="/dashboard/admin-remove.html">
-                        <i>🗑️</i> Supprimer un admin
-                    </a>
-                    <a href="/api/admins" target="_blank">
-                        <i>🔗</i> API List (JSON)
-                    </a>
+            <div class="module-card">
+                <div class="module-title">
+                    <span style="font-size: 1.4rem;">👑</span>
+                    <h2>Administrateurs</h2>
                 </div>
-            </div>
-
-            <!-- Module Sessions -->
-            <div class="module">
-                <h2>📱 Sessions</h2>
                 <div class="module-links">
-                    <a href="/dashboard/sessions.html">
-                        <i>📋</i> Gérer les sessions
+                    <a href="/dashboard/admins.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">📋</span>
+                            <span>Gérer la liste d'admins</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
                     </a>
-                    <a href="/dashboard/session-connect.html">
-                        <i>🔌</i> Connecter un numéro
+                    <a href="/dashboard/admin-add.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">➕</span>
+                            <span>Ajouter un administrateur</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
                     </a>
-                    <a href="/dashboard/session-config.html">
-                        <i>⚙️</i> Configurer une session
+                    <a href="/dashboard/admin-remove.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🗑️</span>
+                            <span>Retirer un administrateur</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
                     </a>
-                    <a href="/dashboard/session-about.html">
-                        <i>ℹ️</i> Voir "About" d'un contact
-                    </a>
-                    <a href="/api/sessions" target="_blank">
-                        <i>🔗</i> API Sessions (JSON)
+                    <a href="/api/admins" target="_blank" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🌐</span>
+                            <span>API JSON Admins</span>
+                        </div>
+                        <span class="nav-arrow">↗</span>
                     </a>
                 </div>
             </div>
 
             <!-- Module Actions Rapides -->
-            <div class="module">
-                <h2>⚡ Actions Rapides</h2>
+            <div class="module-card">
+                <div class="module-title">
+                    <span style="font-size: 1.4rem;">⚡</span>
+                    <h2>Contrôle & Diagnostic</h2>
+                </div>
                 <div class="module-links">
-                    <a href="/dashboard/connect-all.html">
-                        <i>🔄</i> Connecter toutes les sessions
+                    <a href="/dashboard/connect-all.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🔄</span>
+                            <span>Reconnecter toutes les sessions</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
                     </a>
-                    <a href="/dashboard/reconnect.html">
-                        <i>📡</i> Reconnecter les sessions
+                    <a href="/dashboard/active.html" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">📊</span>
+                            <span>Surveillance en temps réel</span>
+                        </div>
+                        <span class="nav-arrow">→</span>
                     </a>
-                    <a href="/dashboard/active.html">
-                        <i>📊</i> Voir les sessions actives
+                    <a href="/ping" target="_blank" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🏓</span>
+                            <span>Vérifier le Ping Serveur</span>
+                        </div>
+                        <span class="nav-arrow">↗</span>
                     </a>
-                    <a href="/ping" target="_blank">
-                        <i>🏓</i> Ping le bot
-                    </a>
-                    <a href="/active" target="_blank">
-                        <i>🔗</i> API Active (JSON)
+                    <a href="/api/sessions" target="_blank" class="nav-item">
+                        <div class="nav-item-left">
+                            <span class="nav-item-icon">🌐</span>
+                            <span>API JSON Sessions</span>
+                        </div>
+                        <span class="nav-arrow">↗</span>
                     </a>
                 </div>
             </div>
+
         </div>
 
-        <!-- Console Log -->
-        <div class="module" style="grid-column: 1/-1;">
-            <h2>📝 Console</h2>
-            <div id="console" style="background: #1e1e1e; color: #00ff00; padding: 1rem; border-radius: 10px; font-family: monospace; height: 150px; overflow-y: auto;">
-                <div>🚀 Dashboard chargé...</div>
+        <!-- Real-time Console Log -->
+        <div class="terminal-box">
+            <div class="terminal-header">
+                <div class="terminal-dots">
+                    <span class="dot dot-red"></span>
+                    <span class="dot dot-yellow"></span>
+                    <span class="dot dot-green"></span>
+                </div>
+                <div>JOURNAL D'ACTIVITÉ DU DASHBOARD (LIVE)</div>
+                <div id="haïtiTime">Port-au-Prince</div>
+            </div>
+            <div class="terminal-body" id="consoleBody">
+                <div>[INITIALISATION] Connexion au serveur KAIDO-MD établie...</div>
             </div>
         </div>
+
     </div>
 
+    <!-- Footer -->
+    <footer>
+        <p>© 2026 KAIDO-MD — Système Multi-Sessions WhatsApp Hautes Performances</p>
+    </footer>
+
     <script>
-        async function updateStats() {
+        function logToConsole(message) {
+            const consoleBody = document.getElementById('consoleBody');
+            const now = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.textContent = `[${now}] ${message}`;
+            consoleBody.appendChild(logEntry);
+            consoleBody.scrollTop = consoleBody.scrollHeight;
+        }
+
+        async function updateDashboardMetrics() {
             try {
-                // Update active sessions
+                // 1. Fetch Active Sessions
                 const activeRes = await fetch('/api/active');
                 const activeData = await activeRes.json();
                 document.getElementById('activeCount').textContent = activeData.count || 0;
 
-                // Update newsletters count
+                // 2. Fetch Total Sessions
+                const sessionsRes = await fetch('/api/sessions');
+                const sessionsData = await sessionsRes.json();
+                const total = sessionsData.total !== undefined ? sessionsData.total : (sessionsData.sessions ? sessionsData.sessions.length : 0);
+                document.getElementById('totalSessionsCount').textContent = total;
+
+                // 3. Fetch Newsletters
                 const newsRes = await fetch('/api/newsletters');
                 const newsData = await newsRes.json();
-                document.getElementById('newsletterCount').textContent = newsData.list?.length || 0;
+                document.getElementById('newsletterCount').textContent = newsData.list ? newsData.list.length : 0;
 
-                // Update admins count
+                // 4. Fetch Admins
                 const adminRes = await fetch('/api/admins');
                 const adminData = await adminRes.json();
-                document.getElementById('adminCount').textContent = adminData.list?.length || 0;
+                document.getElementById('adminCount').textContent = adminData.list ? adminData.list.length : 0;
 
-                // Update bot status
+                // 5. Ping Server
                 const pingRes = await fetch('/ping');
                 if (pingRes.ok) {
-                    document.getElementById('botStatus').textContent = '✅ Bot opérationnel';
-                    document.getElementById('botStatusBadge').className = 'status-badge status-online';
+                    document.getElementById('botStatusText').textContent = 'Système Opérationnel';
+                    document.getElementById('statusPulseDot').style.background = '#10b981';
                 }
 
-                // Add to console
-                const consoleDiv = document.getElementById('console');
-                const time = new Date().toLocaleTimeString();
-                consoleDiv.innerHTML += `<div>[${time}] Stats mises à jour - Actives: ${activeData.count}</div>`;
-                consoleDiv.scrollTop = consoleDiv.scrollHeight;
-
+                logToConsole(`Synchronisation terminée : ${activeData.count || 0} active(s), ${total} totale(s)`);
             } catch (error) {
-                console.error('Error updating stats:', error);
-                document.getElementById('botStatus').textContent = '❌ Erreur de connexion';
-                document.getElementById('botStatusBadge').className = 'status-badge status-offline';
+                console.error('Erreur lors de la mise à jour des métriques:', error);
+                document.getElementById('botStatusText').textContent = 'Connexion interrompue';
+                document.getElementById('statusPulseDot').style.background = '#ef4444';
+                logToConsole(`⚠️ Erreur de synchronisation: ${error.message || error}`);
             }
         }
 
-        // Update stats every 10 seconds
-        updateStats();
-        setInterval(updateStats, 10000);
+        updateDashboardMetrics();
+        setInterval(updateDashboardMetrics, 10000);
     </script>
 </body>
 </html>
