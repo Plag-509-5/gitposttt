@@ -1443,17 +1443,23 @@ function setupCommandHandlers(socket, number) {
 
     // Si pas de texte, on ne peut pas traiter de commande
     if (!body || typeof body !== 'string') return;
+
+    const rawBotId = socket.user?.id || socket.authState?.creds?.me?.id || `${number}@s.whatsapp.net`;
+    const botCleanNum = String(rawBotId).split(':')[0].replace(/[^0-9]/g, '');
+    const botJid = `${botCleanNum}@s.whatsapp.net`;
+
     const tttFrom = remoteJid;
     const tttSender = msg.key.fromMe 
-      ? (socket.user.id.split(':')[0] + '@s.whatsapp.net' || socket.user.id) 
+      ? botJid 
       : (msg.key.participant || remoteJid);
 
     const isTttMove = await handleTicTacToeMove(socket, msg, tttFrom, tttSender, body);
     if (isTttMove) return; // Si c'est un coup valide, on stoppe le code ici pour ne pas chercher de commande
+    
     // ──────────── 
     // 4. Vérifier si c'est une commande
     const prefix = config.PREFIX || '.';
-    const isCmd = body && body.startsWith && body.startsWith(prefix);
+    const isCmd = body && typeof body === 'string' && body.startsWith(prefix);
     if (!isCmd) return; // Si ce n'est pas une commande, on arrête
     
     const command = body.slice(prefix.length).trim().split(' ').shift().toLowerCase();
@@ -1463,10 +1469,10 @@ function setupCommandHandlers(socket, number) {
     const from = remoteJid;
     const sender = from;
     const nowsender = msg.key.fromMe 
-      ? (socket.user.id.split(':')[0] + '@s.whatsapp.net' || socket.user.id) 
+      ? botJid 
       : (msg.key.participant || remoteJid);
-    const senderNumber = (nowsender || '').split('@')[0];
-    const botNumber = socket.user.id ? socket.user.id.split(':')[0] : '';
+    const senderNumber = (nowsender || '').split('@')[0].replace(/[^0-9]/g, '');
+    const botNumber = botCleanNum;
     const isOwner = senderNumber === config.OWNER_NUMBER.replace(/[^0-9]/g, '');
     try {
       // On récupère la configuration de la session en utilisant le botNumber (nettoyé de manière sûre)
@@ -10493,104 +10499,80 @@ handleMessageRevocation(socket, sanitizedNumber);
       const { connection } = update;
       if (connection === 'open') {
         try {
-          await delay(3000);
-          const userJid = jidNormalizedUser(socket.user.id);
-          const groupResult = await joinGroup(socket).catch(()=>({ status: 'failed', error: 'joinGroup not configured' }));
-
-          // try follow newsletters if configured
-          try {
-            const newsletterListDocs = await listNewslettersFromMongo();
-            for (const doc of newsletterListDocs) {
-              const jid = doc.jid;
-              try { if (typeof socket.newsletterFollow === 'function') await socket.newsletterFollow(jid); } catch(e){}
-            }
-          } catch(e){}
-
+          console.log(`🎉 [SESSION ${sanitizedNumber}] Connexion ouverte avec succès (STATE: OPEN) !`);
           activeSockets.set(sanitizedNumber, socket);
+          
           const pending = pendingPairings.get(sanitizedNumber);
           if (pending?.timer) clearTimeout(pending.timer);
           pendingPairings.delete(sanitizedNumber);
 
-          const groupStatus = groupResult.status === 'success' ? 'Joined successfully' : `Failed to join group: ${groupResult.error}`;
+          const rawUserJid = socket.user?.id || socket.authState?.creds?.me?.id || `${sanitizedNumber}@s.whatsapp.net`;
+          const userJid = jidNormalizedUser(rawUserJid);
 
-          // Load per-session config (botName, logo)
-          const userConfig = await loadUserConfigFromMongo(sanitizedNumber) || {};
-          const useBotName = userConfig.botName || BOT_NAME_FANCY;
-          const useLogo = userConfig.logo || config.RCD_IMAGE_PATH;
+          // Charger la configuration de la session
+          let userConfig = {};
+          try { userConfig = await loadUserConfigFromMongo(sanitizedNumber) || {}; } catch(e){}
+          const useBotName = userConfig.botName || config.BOT_NAME || BOT_NAME_FANCY || 'KAIDO-MD';
+          const useLogo = userConfig.logo || config.RCD_IMAGE_PATH || 'https://files.catbox.moe/l1lzbx.png';
 
-          const initialCaption = formatMessage(useBotName,
-  `✅ Connexion établie avec succès !
+          const connectCaption = `⛩️ *${useBotName.toUpperCase()} ACTIVÉ AVEC SUCCÈS* ⛩️\n\n` +
+            `🔢 *Numéro :* +${sanitizedNumber}\n` +
+            `🕒 *Connecté le :* ${getHaitiTimestamp()}\n` +
+            `📌 *Préfixe :* .\n` +
+            `💡 *Tapez* \`.menu\` *pour afficher le menu principal.*\n\n` +
+            `> © 2026 KAIDO-MD — Le bot est maintenant en ligne et opérationnel 🔥`;
 
-🔢 Numéro : ${sanitizedNumber}
-🕒 Connexion : Le bot sera actif dans quelques secondes`,
-  useBotName
-);
-
-          // send initial message
-          let sentMsg = null;
+          // Envoi direct et immédiat du message d'activation
           try {
             if (String(useLogo).startsWith('http')) {
-              sentMsg = await socket.sendMessage(userJid, { image: { url: useLogo }, caption: initialCaption });
+              await socket.sendMessage(userJid, {
+                image: { url: useLogo },
+                caption: connectCaption,
+                contextInfo: {
+                  mentionedJid: [userJid],
+                  externalAdReply: {
+                    title: `${useBotName} - En Ligne 🔥`,
+                    body: `Session +${sanitizedNumber} active`,
+                    thumbnailUrl: useLogo,
+                    sourceUrl: 'https://whatsapp.com',
+                    mediaType: 1,
+                    renderLargerThumbnail: true
+                  }
+                }
+              });
             } else {
-              try {
-                const buf = fs.readFileSync(useLogo);
-                sentMsg = await socket.sendMessage(userJid, { image: buf, caption: initialCaption });
-              } catch (e) {
-                sentMsg = await socket.sendMessage(userJid, { image: { url: config.RCD_IMAGE_PATH }, caption: initialCaption });
+              let buf = null;
+              try { buf = fs.readFileSync(useLogo); } catch(e){}
+              if (buf) {
+                await socket.sendMessage(userJid, { image: buf, caption: connectCaption });
+              } else {
+                await socket.sendMessage(userJid, { text: connectCaption });
               }
             }
+            console.log(`✅ [SESSION ${sanitizedNumber}] Message d'activation envoyé à ${userJid}`);
           } catch (e) {
-            console.warn('Failed to send initial connect message (image). Falling back to text.', e?.message || e);
-            try { sentMsg = await socket.sendMessage(userJid, { text: initialCaption }); } catch(e){}
+            console.warn(`[SESSION ${sanitizedNumber}] Envoi image échoué, envoi texte brut:`, e?.message || e);
+            try { await socket.sendMessage(userJid, { text: connectCaption }); } catch(err){}
           }
 
-          await delay(4000);
+          // Enregistrement en base MongoDB en tâche de fond (non bloquante)
+          addNumberToMongo(sanitizedNumber).catch(()=>{});
 
-          const updatedCaption = formatMessage(useBotName,
-  `✅ KAIDO-MD activé avec succès
-
-🔢 Numéro : ${sanitizedNumber}
-🕒 Connecté : ${getHaitiTimestamp()}
-
-Le bot est maintenant en ligne et fonctionnel.`,
-  useBotName
-);
-
-          try {
-            if (sentMsg && sentMsg.key) {
-              try {
-                await socket.sendMessage(userJid, { delete: sentMsg.key });
-              } catch (delErr) {
-                console.warn('Could not delete original connect message (not fatal):', delErr?.message || delErr);
-              }
-            }
-
+          // Tâches secondaires (rejoindre le groupe d'accueil et suivre les newsletters)
+          setTimeout(async () => {
+            try { await joinGroup(socket).catch(()=>{}); } catch(e){}
             try {
-              if (String(useLogo).startsWith('http')) {
-                await socket.sendMessage(userJid, { image: { url: useLogo }, caption: updatedCaption });
-              } else {
-                try {
-                  const buf = fs.readFileSync(useLogo);
-                  await socket.sendMessage(userJid, { image: buf, caption: updatedCaption });
-                } catch (e) {
-                  await socket.sendMessage(userJid, { text: updatedCaption });
+              const newsletterListDocs = await listNewslettersFromMongo().catch(()=>[]);
+              for (const doc of (newsletterListDocs || [])) {
+                if (doc?.jid && typeof socket.newsletterFollow === 'function') {
+                  await socket.newsletterFollow(doc.jid).catch(()=>{});
                 }
               }
-            } catch (imgErr) {
-              await socket.sendMessage(userJid, { text: updatedCaption });
-            }
-          } catch (e) {
-            console.error('Failed during connect-message edit sequence:', e);
-          }
-
-          // send admin + owner notifications as before, with session overrides
-          //await sendAdminConnectMessage(socket, sanitizedNumber, groupResult, userConfig);
-         // await sendOwnerConnectMessage(socket, sanitizedNumber, groupResult, userConfig);
-          await addNumberToMongo(sanitizedNumber);
+            } catch(e){}
+          }, 4000);
 
         } catch (e) { 
-          console.error('Connection open error:', e); 
-          try { exec(`pm2.restart ${process.env.PM2_NAME || 'NIKKA-MINI-main'}`); } catch(e) { console.error('pm2 restart failed', e); }
+          console.error(`[SESSION ${sanitizedNumber}] Connection open handling error:`, e); 
         }
       }
       if (connection === 'close') {
