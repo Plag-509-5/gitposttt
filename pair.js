@@ -142,7 +142,6 @@ async function initMongo() {
     mongoAvailable = false;
   }
 }
-}
 
 // ---------------- Mongo helpers (fail-safe) ----------------
 
@@ -274,75 +273,89 @@ async function removeNewsletterFromMongo(jid) {
 
 async function listNewslettersFromMongo() {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !newsletterCol) return [];
     const docs = await newsletterCol.find({}).toArray();
     return docs.map(d => ({ jid: d.jid, emojis: Array.isArray(d.emojis) ? d.emojis : [] }));
-  } catch (e) { console.error('listNewslettersFromMongo', e); return []; }
+  } catch (e) { return []; }
 }
 
 async function saveNewsletterReaction(jid, messageId, emoji, sessionNumber) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !mongoDB) return;
     const doc = { jid, messageId, emoji, sessionNumber, ts: new Date() };
-    if (!mongoDB) await initMongo();
     const col = mongoDB.collection('newsletter_reactions_log');
     await col.insertOne(doc);
-    console.log(`Saved reaction ${emoji} for ${jid}#${messageId}`);
-  } catch (e) { console.error('saveNewsletterReaction', e); }
+  } catch (e) {}
 }
 
 async function setUserConfigInMongo(number, conf) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !configsCol) return;
     const sanitized = number.replace(/[^0-9]/g, '');
     await configsCol.updateOne({ number: sanitized }, { $set: { number: sanitized, config: conf, updatedAt: new Date() } }, { upsert: true });
-  } catch (e) { console.error('setUserConfigInMongo', e); }
+  } catch (e) {}
 }
 
 async function loadUserConfigFromMongo(number) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !configsCol) return null;
     const sanitized = number.replace(/[^0-9]/g, '');
     const doc = await configsCol.findOne({ number: sanitized });
     return doc ? doc.config : null;
-  } catch (e) { console.error('loadUserConfigFromMongo', e); return null; }
+  } catch (e) { return null; }
 }
 
 async function loadSessionConfigMerged(number) {
-  const sanitized = String(number).replace(/[^0-9]/g, '');
-  // charge la config brute depuis la DB
-  const dbCfg = await loadUserConfigFromMongo(sanitized) || {};
-  // fusionne : les valeurs en DB écrasent les defaults
+  const sanitized = String(number || '').replace(/[^0-9]/g, '');
+  let dbCfg = null;
+  try {
+    dbCfg = await loadUserConfigFromMongo(sanitized);
+  } catch (e) {
+    dbCfg = null;
+  }
   const merged = { ...DEFAULT_SESSION_CONFIG, ...dbCfg };
   return merged;
 }
 
 // Helpers Mongo pour persister le schedule
 async function getRestartSchedule() {
-  await initMongo();
-  const col = mongoDB.collection('restart_schedule');
-  const doc = await col.findOne({ key: 'schedule' });
-  return doc ? doc : null;
+  try {
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !mongoDB) return null;
+    const col = mongoDB.collection('restart_schedule');
+    const doc = await col.findOne({ key: 'schedule' });
+    return doc ? doc : null;
+  } catch(e) { return null; }
 }
 
 async function setRestartSchedule(minutes) {
-  await initMongo();
-  const col = mongoDB.collection('restart_schedule');
-  await col.updateOne(
-    { key: 'schedule' },
-    { $set: { minutes, active: true, updatedAt: Date.now() } },
-    { upsert: true }
-  );
+  try {
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !mongoDB) return;
+    const col = mongoDB.collection('restart_schedule');
+    await col.updateOne(
+      { key: 'schedule' },
+      { $set: { minutes, active: true, updatedAt: Date.now() } },
+      { upsert: true }
+    );
+  } catch(e) {}
 }
 
 async function stopRestartSchedule() {
-  await initMongo();
-  const col = mongoDB.collection('restart_schedule');
-  await col.updateOne(
-    { key: 'schedule' },
-    { $set: { active: false, updatedAt: Date.now() } },
-    { upsert: true }
-  );
+  try {
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !mongoDB) return;
+    const col = mongoDB.collection('restart_schedule');
+    await col.updateOne(
+      { key: 'schedule' },
+      { $set: { active: false, updatedAt: Date.now() } },
+      { upsert: true }
+    );
+  } catch(e) {}
 }
 
 // Assure-toi que initMongo() initialise `mongoDB` (ex: mongoDB = client.db(process.env.MONGO_DB))
@@ -10481,11 +10494,7 @@ async function EmpirePair(number, res) {
 
       if (connection === 'open') {
         try {
-<<<<<<< HEAD
-          console.log(`🎉 [SESSION ${sanitizedNumber}] Connexion ouverte avec succès (STATE: OPEN) !`);
-=======
           console.log(`[CONNEXION +${sanitizedNumber}] 🟢 Session connectée avec succès.`);
->>>>>>> 7605486 (fix(core): remove duplicate auto-restart listener, overhaul tictactoe engine, clean welcome message, and silence noisy logs)
           activeSockets.set(sanitizedNumber, socket);
           
           const pending = pendingPairings.get(sanitizedNumber);
