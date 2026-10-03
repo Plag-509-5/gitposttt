@@ -1,75 +1,51 @@
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const bodyParser = require("body-parser");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-let code = require('./pair'); 
-
 require('events').EventEmitter.defaultMaxListeners = 500;
 
-// Middleware
+// Middlewares
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Routes
-app.use('/code', code);
-
-// Page de pairing
-app.get('/pair', (req, res) => {
-  res.sendFile(path.join(process.cwd(), 'pair.html'));
-});
-
-// Page de suppression
-app.get('/delete', (req, res) => {
-  res.sendFile(path.join(process.cwd(), 'delete.html'));
-});
-
-// Page principale
-app.get('/', (req, res) => {
-  res.sendFile(path.join(process.cwd(), 'main.html'));
-});
-
-// ===== SERVIR LES FICHIERS STATIQUES DU DASHBOARD =====
-// IMPORTANT: Cette ligne doit être AVANT vos routes /dashboard
+// Servir les fichiers statiques du dashboard
 app.use('/dashboard', express.static(path.join(process.cwd(), 'dashboard_static')));
 
-// ===== VOS AUTRES ROUTES API =====
-// Middleware d'authentification
+// Middleware d'authentification admin pour routes protégées
 function requireAdminPass(req, res, next) {
+  const adminPass = process.env.ADMIN_PASS || 'adminplag';
   const pass = req.headers['x-admin-pass'] || req.body?.adminPass;
-  if (pass === 'adminplag') return next();
+  if (pass === adminPass) return next();
   return res.status(401).json({ ok: false, error: 'Unauthorized' });
 }
 
-// Route de suppression admin
-app.post('/api/session/delete', requireAdminPass, async (req, res) => {
-  try {
-    const { number } = req.body;
-    if (!number) return res.status(400).json({ ok: false, error: 'number required' });
+// Router principal (Pairing + Dashboard API + WhatsApp Socket Management)
+const pairRouter = require('./pair');
+app.use('/', pairRouter);
+app.use('/code', pairRouter);
 
-    const sanitized = ('' + number).replace(/[^0-9]/g, '');
-    console.log(`Suppression de la session ${sanitized}`);
-    return res.json({ ok: true, message: `Session ${sanitized} removed` });
-  } catch (err) {
-    console.error('API /api/session/delete error', err);
-    return res.status(500).json({ ok: false, error: err.message || String(err) });
-  }
+// Gestion des rejets de promesses non gérés
+process.on('unhandledRejection', (reason, promise) => {
+  console.warn('⚠️ Unhandled Promise Rejection:', reason);
 });
 
 // Lancement du serveur
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔════════════════════════════════════╗
 ║     KAIDO-MD Dashboard Server      ║
 ╠════════════════════════════════════╣
-║  Server running on:                ║
+║  Serveur actif sur :               ║
 ║  http://localhost:${PORT}                ║
 ║                                    ║
-║  Dashboard:                        ║
+║  Tableau de bord :                 ║
 ║  http://localhost:${PORT}/dashboard     ║
 ║  http://localhost:${PORT}/dashboard/sessions.html
 ║  http://localhost:${PORT}/dashboard/admins.html
+║  http://localhost:${PORT}/pair
 ╚════════════════════════════════════╝
 `);
 });
