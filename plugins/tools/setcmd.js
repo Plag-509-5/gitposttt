@@ -17,9 +17,9 @@ module.exports = {
   name: 'setcmd',
   alias: ['setsticker', 'setreact', 'stickercmd', 'reactcmd', 'delcmd', 'delreact', 'listcmd', 'cmdlist'],
   category: 'owner',
-  description: 'Associe un sticker OU une réaction emoji à une commande (ex: .setcmd save, ✅ ou en répondant à un sticker)',
-  usage: '.setcmd <commande>, <emoji> | .setcmd <commande> (en répondant à un sticker) | .delcmd | .listcmd',
-  async execute({ socket, msg, from, sender, senderNumber, args, command, prefix, quotedMsg, config, isOwner }) {
+  description: 'Associe un sticker OU une réaction emoji à une commande (ex: .setcmd save, ✅ ou en répondant à un sticker/emoji)',
+  usage: '.setcmd <commande>, <emoji> | .setcmd <commande> (en répondant à un sticker ou emoji) | .delcmd | .listcmd',
+  async execute({ socket, msg, from, sender, senderNumber, args, command, prefix, quotedMsg, contextInfo, config, isOwner }) {
     // ── VÉRIFICATION DES PERMISSIONS : Réservé exclusivement au propriétaire du bot ──
     const botNum = String(socket.user?.id || '').split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
     const ownerNum = String(config?.OWNER_NUMBER || '').replace(/[^0-9]/g, '');
@@ -32,12 +32,17 @@ module.exports = {
     }
 
     const quoted = quotedMsg 
+      || contextInfo?.quotedMessage
       || msg.message?.extendedTextMessage?.contextInfo?.quotedMessage
-      || msg.message?.stickerMessage?.contextInfo?.quotedMessage;
+      || msg.message?.stickerMessage?.contextInfo?.quotedMessage
+      || msg.quoted?.msg;
 
     const stickerMsg = quoted?.stickerMessage 
       || (quoted?.viewOnceMessage?.message?.stickerMessage) 
       || msg.message?.stickerMessage;
+
+    // Détection de texte ou emoji dans le message cité
+    const quotedText = (quoted?.conversation || quoted?.extendedTextMessage?.text || '').trim();
 
     const rawArgs = args.join(' ').trim();
 
@@ -48,7 +53,7 @@ module.exports = {
 
       if (!stickerList.length && !reactList.length) {
         return await socket.sendMessage(from, {
-          text: `📭 *Aucun alias enregistré.*\n\n💡 *Pour en créer :*\n• *Réaction Emoji :* \`${prefix}setcmd save, ✅\`\n• *Sticker :* Répondez à un sticker avec \`${prefix}setcmd ping\``
+          text: `📭 *Aucun alias enregistré.*\n\n💡 *Pour en créer :*\n• *Réaction Emoji :* \`${prefix}setcmd save, ✅\` (ou en répondant à un emoji avec \`${prefix}setcmd save\`)\n• *Sticker :* Répondez à un sticker avec \`${prefix}setcmd ping\``
         }, { quoted: msg });
       }
 
@@ -86,11 +91,19 @@ module.exports = {
         }
       }
 
-      // Cas 2 : Suppression par argument (Emoji ou nom de commande)
+      // Cas 2 : Suppression d'un emoji cité
+      if (quotedText && isEmoji(quotedText)) {
+        const deleted = await deleteReactionCommand(quotedText);
+        if (deleted) {
+          return await socket.sendMessage(from, { text: `🗑️ *Alias réaction ${quotedText} supprimé avec succès !*` }, { quoted: msg });
+        }
+      }
+
+      // Cas 3 : Suppression par argument (Emoji ou nom de commande)
       const target = rawArgs.trim();
       if (!target) {
         return await socket.sendMessage(from, {
-          text: `❌ *Usage :* \`${prefix}delcmd ✅\` ou \`${prefix}delcmd save\` ou répondez au sticker avec \`${prefix}delcmd\``
+          text: `❌ *Usage :* \`${prefix}delcmd ✅\` ou \`${prefix}delcmd save\` ou répondez au sticker/emoji avec \`${prefix}delcmd\``
         }, { quoted: msg });
       }
 
@@ -117,7 +130,7 @@ module.exports = {
 
     // ── 3. COMMANDE D'ENREGISTREMENT (.setcmd / .setreact) ──
 
-    // SCÉNARIO A : Association par STICKER (en répondant à un sticker)
+    // SCÉNARIO A : Association par STICKER cité (en répondant à un sticker avec .setcmd <commande>)
     if (stickerMsg) {
       const targetCmd = rawArgs.replace(/^[./!#]/, '').trim();
       if (!targetCmd) {
@@ -138,7 +151,19 @@ module.exports = {
       }, { quoted: msg });
     }
 
-    // SCÉNARIO B : Association par RÉACTION EMOJI (ex: .setcmd save, ✅ ou .setcmd save ✅ ou .setreact save , ❤️)
+    // SCÉNARIO B : Association par EMOJI CITÉ (en répondant à un message contenant un emoji avec .setcmd <commande>)
+    if (quotedText && isEmoji(quotedText) && rawArgs) {
+      const targetCmd = rawArgs.replace(/^[./!#]/, '').trim();
+      if (targetCmd) {
+        await setReactionCommand(quotedText, targetCmd, senderNumber, botNum);
+
+        return await socket.sendMessage(from, {
+          text: `✨ *Réaction Emoji liée avec succès !*\n\n🔮 *Emoji cité :* ${quotedText}\n🎯 *Commande cible :* \`${prefix}${targetCmd}\`\n\n💡 *Fonctionnement :* Réagissez avec ${quotedText} à n'importe quel message (texte, photo, vidéo, statut, vue unique) pour déclencher automatiquement \`${prefix}${targetCmd}\` sur ce message !`
+        }, { quoted: msg });
+      }
+    }
+
+    // SCÉNARIO C : Association explicite par argument (ex: .setcmd save, ✅ ou .setcmd save ✅ ou .setreact save , ❤️)
     if (rawArgs.includes(',') || rawArgs.split(/\s+/).length >= 2 || isEmoji(rawArgs)) {
       let cmdPart = '';
       let emojiPart = '';
@@ -173,7 +198,7 @@ module.exports = {
       text: `💡 *Guide d'utilisation de .setcmd :*\n\n` +
             `1️⃣ *Lier un Emoji à une commande :*\n` +
             `• \`${prefix}setcmd save, ✅\` (Réagir avec ✅ déballe et enregistre le média)\n` +
-            `• \`${prefix}setcmd ping, ⚡\`\n\n` +
+            `• Ou répondez à un message avec un emoji : \`${prefix}setcmd save\`\n\n` +
             `2️⃣ *Lier un Sticker à une commande :*\n` +
             `• Répondez à un sticker avec \`${prefix}setcmd <nom_commande>\`\n\n` +
             `3️⃣ *Gérer les alias existants :*\n` +

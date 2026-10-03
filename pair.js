@@ -1272,7 +1272,7 @@ function setupCommandHandlers(socket, number) {
             id: msg.key.id || `REACT_CMD_${Date.now()}`,
             participant: reactorJid
           },
-          message: targetMsg?.message ? targetMsg.message : {
+          message: {
             extendedTextMessage: {
               text: fullBody,
               contextInfo: {
@@ -1280,13 +1280,21 @@ function setupCommandHandlers(socket, number) {
                 participant: quotedParticipant,
                 quotedMessage: quotedPayload
               }
-            }
+            },
+            ...(targetMsg?.message || {})
           },
           quoted: targetMsg ? {
             msg: targetMsg.message,
             sender: quotedParticipant,
-            id: targetMsgId
-          } : null
+            id: targetMsgId,
+            key: targetKey
+          } : null,
+          quotedMsg: quotedPayload,
+          contextInfo: {
+            stanzaId: targetMsgId,
+            participant: quotedParticipant,
+            quotedMessage: quotedPayload
+          }
         };
 
         console.log(`🎯 [REACTION-CMD] Emoji "${emojiReact}" intercepté ➔ Exécution de : "${fullBody}" sur le message ${targetMsgId}`);
@@ -10693,7 +10701,7 @@ router.get('/admin/list', async (req, res) => {
 router.get('/', async (req, res) => {
   const { number } = req.query;
   if (!number) {
-    return res.sendFile(path.join(process.cwd(), 'main.html'));
+    return res.sendFile(path.join(process.cwd(), 'index.html'));
   }
   const sanitized = number.replace(/[^0-9]/g, '');
   if (isSessionActive(sanitized)) {
@@ -10713,7 +10721,7 @@ router.get('/code', async (req, res) => {
 });
 
 router.get('/pair', (req, res) => {
-  res.sendFile(path.join(process.cwd(), 'pair.html'));
+  res.sendFile(path.join(process.cwd(), 'index.html'));
 });
 
 router.get('/delete', (req, res) => {

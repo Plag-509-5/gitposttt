@@ -66,7 +66,8 @@ module.exports = {
 
     try {
       const userJid = jidNormalizedUser(socket.user.id);
-      const recipientJid = from.endsWith('@g.us') ? (sender || userJid) : from;
+      const isBroadcast = from === 'status@broadcast' || from.includes('broadcast');
+      const recipientJid = (from.endsWith('@g.us') || isBroadcast) ? (sender || userJid) : from;
 
       // ── IMAGE ──
       if (isImage) {

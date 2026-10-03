@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KAIDO-MD — Appairage & Centre de Contrôle</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"/>
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --card-bg: rgba(17, 24, 39, 0.85);
+            --card-border: rgba(255, 255, 255, 0.08);
+            --card-hover-border: rgba(99, 102, 241, 0.4);
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --accent-primary: #6366f1;
+            --accent-gradient: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
+            --glow: rgba(99, 102, 241, 0.35);
+            --success: #10b981;
+            --danger: #ef4444;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Plus Jakarta Sans', sans-serif;
+        }
+
+        body {
+            background: radial-gradient(circle at 10% 20%, rgba(99, 102, 241, 0.15) 0%, transparent 40%),
+                        radial-gradient(circle at 90% 80%, rgba(236, 72, 153, 0.12) 0%, transparent 40%),
+                        var(--bg-primary);
+            min-height: 100vh;
+            color: var(--text-main);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .header-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(17, 24, 39, 0.7);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid var(--card-border);
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            z-index: 100;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: #fff;
+            text-decoration: none;
+            font-weight: 800;
+            font-size: 1.1rem;
+        }
+
+        .brand-icon {
+            width: 34px;
+            height: 34px;
+            background: var(--accent-gradient);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+            box-shadow: 0 0 15px var(--glow);
+        }
+
+        .nav-links {
+            display: flex;
+            gap: 12px;
+        }
+
+        .nav-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 14px;
+            border-radius: 10px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            text-decoration: none;
+            color: var(--text-muted);
+            background: rgba(255, 255, 255, 0.04);
+            border: 1px solid var(--card-border);
+            transition: all 0.2s;
+        }
+
+        .nav-btn:hover {
+            color: #fff;
+            background: rgba(99, 102, 241, 0.15);
+            border-color: var(--accent-primary);
+        }
+
+        .container {
+            width: 100%;
+            max-width: 460px;
+            background: var(--card-bg);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            border: 1px solid var(--card-border);
+            border-radius: 24px;
+            padding: 2.2rem 2rem;
+            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.6);
+            text-align: center;
+            margin-top: 60px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 4px;
+            background: var(--accent-gradient);
+        }
+
+        .bot-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            background: rgba(99, 102, 241, 0.12);
+            color: #a5b4fc;
+            border: 1px solid rgba(99, 102, 241, 0.25);
+            margin-bottom: 1.2rem;
+        }
+
+        h1 {
+            font-size: 1.6rem;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+            margin-bottom: 0.4rem;
+            background: linear-gradient(135deg, #fff 40%, #c7d2fe 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        p.subtitle {
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            margin-bottom: 1.8rem;
+            line-height: 1.5;
+        }
+
+        .form-group {
+            margin-bottom: 1.4rem;
+            text-align: left;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.8rem;
+            font-weight: 700;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin-bottom: 0.5rem;
+        }
+
+        .input-wrapper {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+
+        .input-icon {
+            position: absolute;
+            left: 14px;
+            color: var(--text-muted);
+            font-size: 1rem;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 14px 14px 14px 42px;
+            background: rgba(0, 0, 0, 0.35);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            color: #fff;
+            font-size: 1rem;
+            font-family: inherit;
+            outline: none;
+            transition: all 0.2s;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--accent-primary);
+            box-shadow: 0 0 0 3px var(--glow);
+        }
+
+        .btn-submit {
+            width: 100%;
+            padding: 14px;
+            background: var(--accent-gradient);
+            border: none;
+            border-radius: 12px;
+            color: #fff;
+            font-size: 1rem;
+            font-weight: 700;
+            cursor: pointer;
+            box-shadow: 0 4px 15px var(--glow);
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .btn-submit:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.5);
+        }
+
+        .btn-submit:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .result-box {
+            margin-top: 1.5rem;
+            display: none;
+        }
+
+        .code-display {
+            background: rgba(0, 0, 0, 0.5);
+            border: 2px dashed rgba(99, 102, 241, 0.4);
+            border-radius: 14px;
+            padding: 1.2rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            position: relative;
+        }
+
+        .code-display:hover {
+            border-color: var(--accent-primary);
+            background: rgba(99, 102, 241, 0.08);
+        }
+
+        .code-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            margin-bottom: 0.4rem;
+        }
+
+        .code-number {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.9rem;
+            font-weight: 700;
+            letter-spacing: 4px;
+            color: #fff;
+            user-select: all;
+        }
+
+        .copy-hint {
+            font-size: 0.78rem;
+            color: #a5b4fc;
+            margin-top: 0.4rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .status-msg {
+            margin-top: 1rem;
+            font-size: 0.88rem;
+            font-weight: 600;
+            min-height: 24px;
+        }
+
+        .steps {
+            margin-top: 1.5rem;
+            text-align: left;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            padding: 1rem 1.2rem;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+            line-height: 1.6;
+        }
+
+        .steps ol {
+            padding-left: 1.2rem;
+        }
+
+        .steps li {
+            margin-bottom: 4px;
+        }
+
+        .steps strong {
+            color: #fff;
+        }
+
+        @media (max-width: 480px) {
+            .container { padding: 1.5rem 1.2rem; }
+            .header-bar { padding: 10px 14px; }
+            .code-number { font-size: 1.5rem; letter-spacing: 2px; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Header Navigation -->
+    <div class="header-bar">
+        <a href="/" class="brand">
+            <div class="brand-icon">⚡</div>
+            <span>KAIDO-MD</span>
+        </a>
+        <div class="nav-links">
+            <a href="/dashboard" class="nav-btn"><i class="fa-solid fa-gauge"></i> Dashboard</a>
+            <a href="/dashboard/sessions.html" class="nav-btn"><i class="fa-solid fa-mobile-screen"></i> Sessions</a>
+        </div>
+    </div>
+
+    <!-- Main Container -->
+    <div class="container">
+        <div class="bot-badge">
+            <i class="fa-solid fa-robot"></i> SYSTÈME MULTI-SESSIONS
+        </div>
+        <h1>Appairer un Numéro</h1>
+        <p class="subtitle">Entrez votre numéro avec indicatif pour recevoir votre code d'appairage WhatsApp officiel.</p>
+
+        <form id="pairForm">
+            <div class="form-group">
+                <label for="phoneNumber">Numéro de Téléphone</label>
+                <div class="input-wrapper">
+                    <i class="fa-solid fa-phone input-icon"></i>
+                    <input type="text" id="phoneNumber" placeholder="Ex : 50937000000 ou 33600000000" required autofocus />
+                </div>
+            </div>
+
+            <button type="submit" class="btn-submit" id="submitBtn">
+                <i class="fa-solid fa-key"></i> Obtenir mon Code
+            </button>
+        </form>
+
+        <div class="status-msg" id="statusMsg"></div>
+
+        <!-- Pairing Code Result Box -->
+        <div class="result-box" id="resultBox">
+            <div class="code-display" id="codeDisplay" title="Cliquez pour copier">
+                <div class="code-label">Votre Code d'Appairage</div>
+                <div class="code-number" id="codeText">----</div>
+                <div class="copy-hint" id="copyHint">
+                    <i class="fa-regular fa-copy"></i> Cliquez pour copier le code
+                </div>
+            </div>
+
+            <div class="steps">
+                <ol>
+                    <li>Ouvrez <strong>WhatsApp</strong> sur votre téléphone.</li>
+                    <li>Allez dans <strong>Appareils connectés</strong> > <strong>Connecter un appareil</strong>.</li>
+                    <li>Appuyez sur <strong>Lier avec un numéro de téléphone</strong>.</li>
+                    <li>Saisissez le code ci-dessus pour activer le bot.</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/axios/1.0.0-alpha.1/axios.min.js"></script>
+    <script>
+        const pairForm = document.getElementById('pairForm');
+        const phoneNumberInput = document.getElementById('phoneNumber');
+        const submitBtn = document.getElementById('submitBtn');
+        const statusMsg = document.getElementById('statusMsg');
+        const resultBox = document.getElementById('resultBox');
+        const codeText = document.getElementById('codeText');
+        const codeDisplay = document.getElementById('codeDisplay');
+        const copyHint = document.getElementById('copyHint');
+
+        pairForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const rawNumber = phoneNumberInput.value.replace(/[^0-9]/g, '');
+
+            if (!rawNumber || rawNumber.length < 8) {
+                statusMsg.innerHTML = '<span style="color:#ef4444;">⚠️ Veuillez entrer un numéro valide avec l\'indicatif pays.</span>';
+                return;
+            }
+
+            submitBtn.disabled = true;
+            submitBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Génération du code...';
+            statusMsg.innerHTML = '<span style="color:#a5b4fc;">Connexion aux serveurs WhatsApp...</span>';
+            resultBox.style.display = 'none';
+
+            try {
+                const { data } = await axios.get(`/code?number=${rawNumber}`);
+
+                if (data && data.code) {
+                    codeText.textContent = data.code;
+                    resultBox.style.display = 'block';
+                    statusMsg.innerHTML = '<span style="color:#10b981;">✅ Code généré avec succès ! Entrez-le sur WhatsApp.</span>';
+                } else if (data && data.status === 'already_connected') {
+                    statusMsg.innerHTML = '<span style="color:#10b981;">✅ Ce numéro est déjà connecté et actif.</span>';
+                } else {
+                    statusMsg.innerHTML = `<span style="color:#ef4444;">❌ Erreur: ${data.error || "Impossible d'obtenir le code"}</span>`;
+                }
+            } catch (err) {
+                const errDetail = err.response?.data?.error || err.message || "Erreur de connexion";
+                statusMsg.innerHTML = `<span style="color:#ef4444;">❌ ${errDetail}</span>`;
+            } finally {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = '<i class="fa-solid fa-key"></i> Obtenir mon Code';
+            }
+        });
+
+        // Click to copy code
+        codeDisplay.addEventListener('click', async () => {
+            const code = codeText.textContent.trim();
+            if (code && code !== '----') {
+                try {
+                    await navigator.clipboard.writeText(code);
+                    copyHint.innerHTML = '<i class="fa-solid fa-check" style="color:#10b981;"></i> <strong style="color:#10b981;">Copié dans le presse-papiers !</strong>';
+                    setTimeout(() => {
+                        copyHint.innerHTML = '<i class="fa-regular fa-copy"></i> Cliquez pour copier le code';
+                    }, 3000);
+                } catch(e) {}
+            }
+        });
+    </script>
+</body>
+</html>
