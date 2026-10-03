@@ -29,7 +29,17 @@ app.use('/code', pairRouter);
 
 // Gestion des rejets de promesses non gérés
 process.on('unhandledRejection', (reason, promise) => {
-  console.warn('⚠️ Unhandled Promise Rejection:', reason);
+  const msg = reason?.message || String(reason || '');
+  if (!msg.includes('querySrv') && !msg.includes('ENOTFOUND') && !msg.includes('buffering timed out')) {
+    console.error('⚠️ [ERREUR SYSTÈME]', msg);
+  }
+});
+
+process.on('uncaughtException', (err) => {
+  const msg = err?.message || String(err || '');
+  if (!msg.includes('querySrv') && !msg.includes('ENOTFOUND')) {
+    console.error('⚠️ [EXCEPTION NON CAPTURÉE]', msg);
+  }
 });
 
 // Lancement du serveur

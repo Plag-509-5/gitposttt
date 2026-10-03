@@ -100,112 +100,127 @@ const config = {
 };
 
 
-// ---------------- MONGO SETUP ----------------
+// ---------------- MONGO SETUP & SILENT FAILOVER ----------------
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://test2_db_user:cSq3iGhurIFh9xpp@clusterrender.v8sosxk.mongodb.net/?appName=Clusterrender';
-const MONGO_DB = process.env.MONGO_DB || 'MUGIWARA_NO_PLAG'
-let mongoClient, mongoDB;
+const MONGO_DB = process.env.MONGO_DB || 'MUGIWARA_NO_PLAG';
+let mongoClient = null;
+let mongoDB = null;
+let mongoAvailable = false;
+let mongoTested = false;
 let sessionsCol, numbersCol, adminsCol, newsletterCol, configsCol, newsletterReactsCol;
 
 async function initMongo() {
+  if (mongoTested && !mongoAvailable) return;
+  if (mongoClient && mongoDB) return;
+
+  mongoTested = true;
   try {
-    if (mongoClient && mongoClient.topology && mongoClient.topology.isConnected && mongoClient.topology.isConnected()) return;
-  } catch(e){}
-  mongoClient = new MongoClient(MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-  await mongoClient.connect();
-  mongoDB = mongoClient.db(MONGO_DB);
+    mongoClient = new MongoClient(MONGO_URI, {
+      serverSelectionTimeoutMS: 2000,
+      connectTimeoutMS: 2000
+    });
+    await mongoClient.connect();
+    mongoDB = mongoClient.db(MONGO_DB);
 
-  sessionsCol = mongoDB.collection('sessions');
-  numbersCol = mongoDB.collection('numbers');
-  adminsCol = mongoDB.collection('admins');
-  newsletterCol = mongoDB.collection('newsletter_list');
-  configsCol = mongoDB.collection('configs');
-  newsletterReactsCol = mongoDB.collection('newsletter_reacts');
+    sessionsCol = mongoDB.collection('sessions');
+    numbersCol = mongoDB.collection('numbers');
+    adminsCol = mongoDB.collection('admins');
+    newsletterCol = mongoDB.collection('newsletter_list');
+    configsCol = mongoDB.collection('configs');
+    newsletterReactsCol = mongoDB.collection('newsletter_reacts');
 
-  await sessionsCol.createIndex({ number: 1 }, { unique: true });
-  await numbersCol.createIndex({ number: 1 }, { unique: true });
-  await newsletterCol.createIndex({ jid: 1 }, { unique: true });
-  await newsletterReactsCol.createIndex({ jid: 1 }, { unique: true });
-  await configsCol.createIndex({ number: 1 }, { unique: true });
-  await initStickerDb(mongoDB).catch(() => {});
-  await initReactionDb(mongoDB).catch(() => {});
-  console.log('✅ Mongo initialized and collections ready');
+    await sessionsCol.createIndex({ number: 1 }, { unique: true }).catch(()=>{});
+    await numbersCol.createIndex({ number: 1 }, { unique: true }).catch(()=>{});
+    await newsletterCol.createIndex({ jid: 1 }, { unique: true }).catch(()=>{});
+    await newsletterReactsCol.createIndex({ jid: 1 }, { unique: true }).catch(()=>{});
+    await configsCol.createIndex({ number: 1 }, { unique: true }).catch(()=>{});
+    await initStickerDb(mongoDB).catch(() => {});
+    await initReactionDb(mongoDB).catch(() => {});
+    mongoAvailable = true;
+  } catch(e) {
+    mongoAvailable = false;
+  }
+}
 }
 
-// ---------------- Mongo helpers ----------------
+// ---------------- Mongo helpers (fail-safe) ----------------
 
 async function saveCredsToMongo(number, creds, keys = null) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !sessionsCol) return;
     const sanitized = number.replace(/[^0-9]/g, '');
     const doc = { number: sanitized, creds, keys, updatedAt: new Date() };
     await sessionsCol.updateOne({ number: sanitized }, { $set: doc }, { upsert: true });
-    console.log(`Saved creds to Mongo for ${sanitized}`);
-  } catch (e) { console.error('saveCredsToMongo error:', e); }
+  } catch (e) {}
 }
 
 async function loadCredsFromMongo(number) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !sessionsCol) return null;
     const sanitized = number.replace(/[^0-9]/g, '');
     const doc = await sessionsCol.findOne({ number: sanitized });
     return doc || null;
-  } catch (e) { console.error('loadCredsFromMongo error:', e); return null; }
+  } catch (e) { return null; }
 }
 
 async function removeSessionFromMongo(number) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !sessionsCol) return;
     const sanitized = number.replace(/[^0-9]/g, '');
     await sessionsCol.deleteOne({ number: sanitized });
-    console.log(`Removed session from Mongo for ${sanitized}`);
-  } catch (e) { console.error('removeSessionToMongo error:', e); }
+  } catch (e) {}
 }
 
 async function addNumberToMongo(number) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !numbersCol) return;
     const sanitized = number.replace(/[^0-9]/g, '');
     await numbersCol.updateOne({ number: sanitized }, { $set: { number: sanitized } }, { upsert: true });
-    console.log(`Added number ${sanitized} to Mongo numbers`);
-  } catch (e) { console.error('addNumberToMongo', e); }
+  } catch (e) {}
 }
 
 async function removeNumberFromMongo(number) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !numbersCol) return;
     const sanitized = number.replace(/[^0-9]/g, '');
     await numbersCol.deleteOne({ number: sanitized });
-    console.log(`Removed number ${sanitized} from Mongo numbers`);
-  } catch (e) { console.error('removeNumberFromMongo', e); }
+  } catch (e) {}
 }
 
 async function getAllNumbersFromMongo() {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !numbersCol) return [];
     const docs = await numbersCol.find({}).toArray();
     return docs.map(d => d.number);
-  } catch (e) { console.error('getAllNumbersFromMongo', e); return []; }
+  } catch (e) { return []; }
 }
 
 async function loadAdminsFromMongo() {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !adminsCol) return [];
     const docs = await adminsCol.find({}).toArray();
     return docs.map(d => d.jid || d.number).filter(Boolean);
-  } catch (e) { console.error('loadAdminsFromMongo', e); return []; }
+  } catch (e) { return []; }
 }
 
 // Récupérer le statut d'un groupe (welcome ou goodbye)
 async function getGroupFeatureStatus(groupId, feature) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !mongoDB) return 'off';
     const col = mongoDB.collection('group_features');
     const doc = await col.findOne({ groupId: groupId });
     if (!doc) return 'off'; // par défaut désactivé
     return doc[feature] || 'off';
   } catch (e) {
-    console.error(`Erreur getGroupFeatureStatus pour ${feature}:`, e);
     return 'off';
   }
 }
@@ -213,16 +228,15 @@ async function getGroupFeatureStatus(groupId, feature) {
 // Sauvegarder le statut d'un groupe
 async function setGroupFeatureStatus(groupId, feature, status) {
   try {
-    await initMongo();
+    if (!mongoAvailable) await initMongo();
+    if (!mongoAvailable || !mongoDB) return;
     const col = mongoDB.collection('group_features');
     await col.updateOne(
       { groupId: groupId },
       { $set: { groupId: groupId, [feature]: status, updatedAt: new Date() } },
       { upsert: true }
     );
-  } catch (e) {
-    console.error(`Erreur setGroupFeatureStatus pour ${feature}:`, e);
-  }
+  } catch (e) {}
 }
 async function addAdminToMongo(jidOrNumber) {
   try {
@@ -1489,15 +1503,6 @@ function setupCommandHandlers(socket, number) {
     } catch (err) {
       console.error("Erreur lors de la vérification du mode de session:", err);
     }
-    // DEBUG: Afficher les informations pour le débogage
-    console.log('DEBUG Command Handler:');
-    console.log('- Remote JID:', remoteJid);
-    console.log('- Is group?', remoteJid.endsWith('@g.us'));
-    console.log('- Command:', command);
-    console.log('- Body:', body);
-    console.log('- From:', from);
-    console.log('- Sender:', nowsender);
-    
     // 6. Maintenant, traiter les commandes
     // helper: download quoted media into buffer
     async function downloadQuotedMedia(quoted) {
@@ -10372,70 +10377,45 @@ function setupMessageHandlers(socket) {
 
 // ---------------- cleanup helper ----------------
 
+const SESSIONS_DIR = path.join(__dirname, 'sessions');
+if (!fs.existsSync(SESSIONS_DIR)) fs.ensureDirSync(SESSIONS_DIR);
+
+function getSessionPath(sanitizedNumber) {
+  return path.join(SESSIONS_DIR, `session_${sanitizedNumber}`);
+}
+
 async function deleteSessionAndCleanup(number, socketInstance) {
-  const sanitized = number.replace(/[^0-9]/g, '');
+  const sanitized = String(number).replace(/[^0-9]/g, '');
   try {
-    const sessionPath = path.join(os.tmpdir(), `session_${sanitized}`);
+    const sessionPath = getSessionPath(sanitized);
     try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
-    activeSockets.delete(sanitized); socketCreationTime.delete(sanitized);
+    activeSockets.delete(sanitized);
+    socketCreationTime.delete(sanitized);
     try { await removeSessionFromMongo(sanitized); } catch(e){}
     try { await removeNumberFromMongo(sanitized); } catch(e){}
-    try {
-      const ownerJid = `${config.OWNER_NUMBER.replace(/[^0-9]/g,'')}@s.whatsapp.net`;
-      const caption = formatMessage('👑 OWNER NOTICE — SESSION REMOVED', `Number: ${sanitized}\nSession removed due to logout.\n\nActive sessions now: ${activeSockets.size}`, BOT_NAME_FANCY);
-      if (socketInstance && socketInstance.sendMessage) await socketInstance.sendMessage(ownerJid, { image: { url: config.RCD_IMAGE_PATH }, caption });
-    } catch(e){}
-    console.log(`Cleanup completed for ${sanitized}`);
-  } catch (err) { console.error('deleteSessionAndCleanup error:', err); }
+  } catch (err) {}
 }
 
-// ---------------- auto-restart ----------------
-
-function setupAutoRestart(socket, number) {
-  socket.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode
-                         || lastDisconnect?.error?.statusCode
-                         || (lastDisconnect?.error && lastDisconnect.error.toString().includes('401') ? 401 : undefined);
-      const isLoggedOut = statusCode === 401
-                          || (lastDisconnect?.error && lastDisconnect.error.code === 'AUTHENTICATION')
-                          || (lastDisconnect?.error && String(lastDisconnect.error).toLowerCase().includes('logged out'))
-                          || (lastDisconnect?.reason === DisconnectReason?.loggedOut);
-      if (isLoggedOut) {
-        console.log(`User ${number} logged out. Cleaning up...`);
-        try { await deleteSessionAndCleanup(number, socket); } catch(e){ console.error(e); }
-      } else {
-        console.log(`Connection closed for ${number} (not logout). Attempt reconnect...`);
-        try { await delay(10000); activeSockets.delete(number.replace(/[^0-9]/g,'')); socketCreationTime.delete(number.replace(/[^0-9]/g,'')); const mockRes = { headersSent:false, send:() => {}, status: () => mockRes }; await EmpirePair(number, mockRes); } catch(e){ console.error('Reconnect attempt failed', e); }
-      }
-
-    }
-
-  });
-}
-
-// ---------------- EmpirePair (pairing, temp dir, persist to Mongo) ----------------
+// ---------------- EmpirePair (pairing, sessions dir, Baileys socket) ----------------
 
 async function EmpirePair(number, res) {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
-  const sessionPath = path.join(os.tmpdir(), `session_${sanitizedNumber}`);
-  await initMongo().catch(()=>{});
+  const sessionPath = getSessionPath(sanitizedNumber);
+  fs.ensureDirSync(sessionPath);
+
   // Prefill from Mongo if available
   try {
     const mongoDoc = await loadCredsFromMongo(sanitizedNumber);
     if (mongoDoc && mongoDoc.creds) {
-      fs.ensureDirSync(sessionPath);
       fs.writeFileSync(path.join(sessionPath, 'creds.json'), JSON.stringify(mongoDoc.creds, null, 2));
       if (mongoDoc.keys) fs.writeFileSync(path.join(sessionPath, 'keys.json'), JSON.stringify(mongoDoc.keys, null, 2));
-      console.log('Prefilled creds from Mongo');
     }
-  } catch (e) { console.warn('Prefill from Mongo failed', e); }
+  } catch (e) {}
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-  const logger = pino({ level: process.env.NODE_ENV === 'production' ? 'fatal' : 'debug' });
+  const logger = pino({ level: 'silent' });
 
- try {
+  try {
     const msgRetryCounterCache = getSessionRetryCache(sanitizedNumber);
     const socket = makeWASocket({
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
@@ -10453,37 +10433,39 @@ async function EmpirePair(number, res) {
           if (msgObj && msgObj.message) {
             return msgObj.message;
           }
-        } catch (e) {
-          console.warn(`[GETMESSAGE] Key ${key?.id} lookup failed:`, e?.message || e);
-        }
+        } catch (e) {}
         return { conversation: 'KAIDO-MD Sync' };
       }
     });
 
-    // Après avoir créé le socket et défini socketCreationTime
+    socketCreationTime.set(sanitizedNumber, Date.now());
+    socket.downloadMediaMessage = (m, filename) => downloadMediaMessage(m, filename);
+    await setupTranslationWrapper(socket, sanitizedNumber);
 
-socketCreationTime.set(sanitizedNumber, Date.now());
-socket.downloadMediaMessage = (m, filename) => downloadMediaMessage(m, filename)
-await setupTranslationWrapper(socket, sanitizedNumber);
-// ============================================================
-setupStatusHandlers(socket, sanitizedNumber);
-setupCommandHandlers(socket, sanitizedNumber);
-setupMessageHandlers(socket);
-setupAutoRestart(socket, sanitizedNumber);
-setupNewsletterHandlers(socket, sanitizedNumber);
-registerGroupParticipantListener(socket).catch(err => console.error('Listener init failed', err));
-handleMessageRevocation(socket, sanitizedNumber);
+    setupStatusHandlers(socket, sanitizedNumber);
+    setupCommandHandlers(socket, sanitizedNumber);
+    setupMessageHandlers(socket);
+    setupNewsletterHandlers(socket, sanitizedNumber);
+    registerGroupParticipantListener(socket).catch(() => {});
+    handleMessageRevocation(socket, sanitizedNumber);
+
     if (!socket.authState.creds.registered) {
-      let retries = config.MAX_RETRIES;
+      let retries = config.MAX_RETRIES || 5;
       let code;
       while (retries > 0) {
-        try { await delay(1500); code = await socket.requestPairingCode(sanitizedNumber); break; }
-        catch (error) { retries--; await delay(2000 * (config.MAX_RETRIES - retries)); }
+        try { 
+          await delay(1500); 
+          code = await socket.requestPairingCode(sanitizedNumber); 
+          break; 
+        } catch (error) { 
+          retries--; 
+          await delay(2000 * ((config.MAX_RETRIES || 5) - retries)); 
+        }
       }
       if (!res.headersSent) res.send({ code });
     }
 
-    // Save creds to Mongo when updated
+    // Save creds when updated
     socket.ev.on('creds.update', async () => {
       try {
         await saveCreds();
@@ -10491,15 +10473,19 @@ handleMessageRevocation(socket, sanitizedNumber);
         const credsObj = JSON.parse(fileContent);
         const keysObj = state.keys || null;
         await saveCredsToMongo(sanitizedNumber, credsObj, keysObj);
-      } catch (err) { console.error('Failed saving creds on creds.update:', err); }
+      } catch (err) {}
     });
-
 
     socket.ev.on('connection.update', async (update) => {
       const { connection } = update;
+
       if (connection === 'open') {
         try {
+<<<<<<< HEAD
           console.log(`🎉 [SESSION ${sanitizedNumber}] Connexion ouverte avec succès (STATE: OPEN) !`);
+=======
+          console.log(`[CONNEXION +${sanitizedNumber}] 🟢 Session connectée avec succès.`);
+>>>>>>> 7605486 (fix(core): remove duplicate auto-restart listener, overhaul tictactoe engine, clean welcome message, and silence noisy logs)
           activeSockets.set(sanitizedNumber, socket);
           
           const pending = pendingPairings.get(sanitizedNumber);
@@ -10512,26 +10498,34 @@ handleMessageRevocation(socket, sanitizedNumber);
           // Charger la configuration de la session
           let userConfig = {};
           try { userConfig = await loadUserConfigFromMongo(sanitizedNumber) || {}; } catch(e){}
-          const useBotName = userConfig.botName || config.BOT_NAME || BOT_NAME_FANCY || 'KAIDO-MD';
+          const useBotName = userConfig.botName || config.BOT_NAME || 'KAIDO-MD';
           const useLogo = userConfig.logo || config.RCD_IMAGE_PATH || 'https://files.catbox.moe/l1lzbx.png';
 
-          const connectCaption = `⛩️ *${useBotName.toUpperCase()} ACTIVÉ AVEC SUCCÈS* ⛩️\n\n` +
-            `🔢 *Numéro :* +${sanitizedNumber}\n` +
-            `🕒 *Connecté le :* ${getHaitiTimestamp()}\n` +
-            `📌 *Préfixe :* .\n` +
-            `💡 *Tapez* \`.menu\` *pour afficher le menu principal.*\n\n` +
-            `> © 2026 KAIDO-MD — Le bot est maintenant en ligne et opérationnel 🔥`;
+          const welcomeMessage = 
+`⛩️ *${useBotName.toUpperCase()} — BOT CONNECTÉ* ⛩️
 
-          // Envoi direct et immédiat du message d'activation
+👤 *Compte :* +${sanitizedNumber}
+🕒 *Date :* ${getHaitiTimestamp()}
+📌 *Préfixe :* [ . ]
+
+💡 *Commandes utiles :*
+• *.menu* — Afficher le menu principal
+• *.help* — Liste détaillée des commandes
+• *.ping* — Vérifier le statut du bot
+
+━━━━━━━━━━━━━━━━━━━━━━
+> © 2026 ${useBotName} • Tous droits réservés`;
+
+          // Envoi direct et immédiat du message d'accueil
           try {
             if (String(useLogo).startsWith('http')) {
               await socket.sendMessage(userJid, {
                 image: { url: useLogo },
-                caption: connectCaption,
+                caption: welcomeMessage,
                 contextInfo: {
                   mentionedJid: [userJid],
                   externalAdReply: {
-                    title: `${useBotName} - En Ligne 🔥`,
+                    title: `${useBotName} - En Ligne`,
                     body: `Session +${sanitizedNumber} active`,
                     thumbnailUrl: useLogo,
                     sourceUrl: 'https://whatsapp.com',
@@ -10544,21 +10538,19 @@ handleMessageRevocation(socket, sanitizedNumber);
               let buf = null;
               try { buf = fs.readFileSync(useLogo); } catch(e){}
               if (buf) {
-                await socket.sendMessage(userJid, { image: buf, caption: connectCaption });
+                await socket.sendMessage(userJid, { image: buf, caption: welcomeMessage });
               } else {
-                await socket.sendMessage(userJid, { text: connectCaption });
+                await socket.sendMessage(userJid, { text: welcomeMessage });
               }
             }
-            console.log(`✅ [SESSION ${sanitizedNumber}] Message d'activation envoyé à ${userJid}`);
           } catch (e) {
-            console.warn(`[SESSION ${sanitizedNumber}] Envoi image échoué, envoi texte brut:`, e?.message || e);
-            try { await socket.sendMessage(userJid, { text: connectCaption }); } catch(err){}
+            try { await socket.sendMessage(userJid, { text: welcomeMessage }); } catch(err){}
           }
 
-          // Enregistrement en base MongoDB en tâche de fond (non bloquante)
+          // Enregistrement en base de données non bloquant
           addNumberToMongo(sanitizedNumber).catch(()=>{});
 
-          // Tâches secondaires (rejoindre le groupe d'accueil et suivre les newsletters)
+          // Tâches secondaires en arrière-plan
           setTimeout(async () => {
             try { await joinGroup(socket).catch(()=>{}); } catch(e){}
             try {
@@ -10569,12 +10561,13 @@ handleMessageRevocation(socket, sanitizedNumber);
                 }
               }
             } catch(e){}
-          }, 4000);
+          }, 3000);
 
         } catch (e) { 
-          console.error(`[SESSION ${sanitizedNumber}] Connection open handling error:`, e); 
+          console.error(`[CONNEXION +${sanitizedNumber}] Erreur ouverture:`, e.message || e); 
         }
       }
+
       if (connection === 'close') {
         const pending = pendingPairings.get(sanitizedNumber);
         if (pending?.timer) clearTimeout(pending.timer);
@@ -10582,23 +10575,19 @@ handleMessageRevocation(socket, sanitizedNumber);
 
         const statusCode = update.lastDisconnect?.error?.output?.statusCode;
         const shouldReconnect = Boolean(socket.authState?.creds?.registered) && statusCode !== DisconnectReason.loggedOut;
-        console.log(`[SESSION ${sanitizedNumber}] Connexion fermée. Code HTTP: ${statusCode}, Doit reconnecter: ${shouldReconnect}`);
+        console.log(`[CONNEXION +${sanitizedNumber}] 🔴 Session fermée (Code: ${statusCode || 'inconnu'}, Reconnexion: ${shouldReconnect})`);
 
         activeSockets.delete(sanitizedNumber);
         socketCreationTime.delete(sanitizedNumber);
 
         if (shouldReconnect) {
-          console.log(`[SESSION ${sanitizedNumber}] Reconnexion automatique dans 5 secondes...`);
           setTimeout(async () => {
             try {
               const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
               await EmpirePair(sanitizedNumber, mockRes);
-            } catch (err) {
-              console.error(`[SESSION ${sanitizedNumber}] Échec de la reconnexion automatique:`, err.message || err);
-            }
+            } catch (err) {}
           }, 5000);
         } else {
-          console.log(`[SESSION ${sanitizedNumber}] Session fermée ou non enregistrée. Nettoyage...`);
           try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
           await removeSessionFromMongo(sanitizedNumber);
           await removeNumberFromMongo(sanitizedNumber);
@@ -10607,11 +10596,10 @@ handleMessageRevocation(socket, sanitizedNumber);
 
     });
 
-    // Enregistrement du socket en attente de pairing avec expiration automatique (120 secondes)
+    // Expiration automatique du code de pairing si non validé (120 secondes)
     if (!socket.authState.creds.registered) {
       const pairingTimer = setTimeout(() => {
         if (!activeSockets.has(sanitizedNumber)) {
-          console.log(`⏱️ [SESSION ${sanitizedNumber}] Délai d'attente du code de pairing expiré.`);
           try { socket.ws?.close(); } catch(e){}
           pendingPairings.delete(sanitizedNumber);
           try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
@@ -10621,7 +10609,6 @@ handleMessageRevocation(socket, sanitizedNumber);
     }
 
   } catch (error) {
-    console.error('Pairing error:', error);
     socketCreationTime.delete(sanitizedNumber);
     pendingPairings.delete(sanitizedNumber);
     activeSockets.delete(sanitizedNumber);

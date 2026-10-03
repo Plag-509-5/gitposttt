@@ -1,165 +1,249 @@
-// Stockage des parties de Morpion en mémoire vive
-const activeGames = new Map();
+// ============================================================
+// KAIDO-MD — MOTEUR DE JEU MORPION (TIC-TAC-TOE) AMÉLIORÉ
+// ============================================================
+
+const activeGames = new Map(); // chatJid -> GameState
 
 /**
- * Nettoie de manière ultra-stricte un JID WhatsApp.
- * Enlève les espaces, les symboles "+", les identifiants d'appareils (:1, :2) 
- * et ne garde que les chiffres purs suivis de @s.whatsapp.net.
+ * Extrait uniquement les chiffres d'un JID (insensible aux LIDs, :1, @s.whatsapp.net, etc.)
  */
-function cleanJid(jid) {
+function extractUserId(jid) {
   if (!jid) return '';
-  // Si c'est déjà une chaîne, on extrait uniquement les chiffres
-  const rawNumber = jid.split('@')[0].replace(/[^0-9]/g, '');
-  return `${rawNumber}@s.whatsapp.net`;
+  return String(jid).split('@')[0].split(':')[0].replace(/[^0-9]/g, '');
 }
 
 /**
- * Génère le rendu visuel textuel de la grille (Style Rétro)
+ * Normalise un JID propre pour les mentions WhatsApp
+ */
+function normalizeJid(jid) {
+  const id = extractUserId(jid);
+  return id ? `${id}@s.whatsapp.net` : '';
+}
+
+/**
+ * Rendu visuel textuel de la grille 3x3
  */
 function renderBoard(board) {
+  const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'];
   const emojis = board.map((cell, index) => {
     if (cell === 'X') return '❌';
     if (cell === 'O') return '⭕';
-    return ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣'][index];
+    return numberEmojis[index];
   });
 
-  return `       ${emojis[0]} | ${emojis[1]} | ${emojis[2]}\n` +
-         `      ────┼────┼────\n` +
-         `       ${emojis[3]} | ${emojis[4]} | ${emojis[5]}\n` +
-         `      ────┼────┼────\n` +
-         `       ${emojis[6]} | ${emojis[7]} | ${emojis[8]}`;
+  return `       ${emojis[0]}  ┃  ${emojis[1]}  ┃  ${emojis[2]}\n` +
+         `      ━━━━╋━━━━╋━━━━\n` +
+         `       ${emojis[3]}  ┃  ${emojis[4]}  ┃  ${emojis[5]}\n` +
+         `      ━━━━╋━━━━╋━━━━\n` +
+         `       ${emojis[6]}  ┃  ${emojis[7]}  ┃  ${emojis[8]}`;
 }
 
 /**
- * Vérifie s'il y a un gagnant ou match nul
+ * Vérifie l'état de la partie (Gagnant 'X'/'O', Match nul 'tie', ou en cours null)
  */
 function checkWinner(board) {
   const lines = [
-    [0, 1, 2], [3, 4, 5], [6, 7, 8],
-    [0, 3, 6], [1, 4, 7], [2, 5, 8],
-    [0, 4, 8], [2, 4, 6]
+    [0, 1, 2], [3, 4, 5], [6, 7, 8], // Lignes
+    [0, 3, 6], [1, 4, 7], [2, 5, 8], // Colonnes
+    [0, 4, 8], [2, 4, 6]             // Diagonales
   ];
-  for (let line of lines) {
-    const [a, b, c] = line;
+  
+  for (const [a, b, c] of lines) {
     if (board[a] && board[a] === board[b] && board[a] === board[c]) {
       return board[a];
     }
   }
-  if (board.every(cell => cell !== null)) return 'tie';
+  
+  if (board.every(cell => cell !== null)) {
+    return 'tie';
+  }
+  
   return null;
+}
+
+/**
+ * Réinitialise le minuteur d'inactivité (2 minutes)
+ */
+function resetGameTimeout(socket, from, game) {
+  if (game.timeout) clearTimeout(game.timeout);
+  game.timeout = setTimeout(async () => {
+    if (activeGames.has(from)) {
+      activeGames.delete(from);
+      try {
+        await socket.sendMessage(from, {
+          text: `⏱️ *Partie de Morpion expirée pour inactivité (2 minutes sans coup).*`
+        });
+      } catch (e) {}
+    }
+  }, 120000);
 }
 
 /**
  * GESTIONNAIRE SANS PRÉFIXE DES COUPS (1-9)
  */
 async function handleTicTacToeMove(socket, msg, from, sender, text) {
-  // Nettoyage complet du texte reçu (on ne garde que le chiffre)
-  const cleanText = text.toString().trim().replace(/[^1-9]/g, '');
-  if (!/^[1-9]$/.test(cleanText)) return false; 
-  const move = parseInt(cleanText);
+  const rawText = String(text || '').trim();
+  if (!/^[1-9]$/.test(rawText)) return false;
 
   const game = activeGames.get(from);
   if (!game) return false;
 
-  // NETTOYAGE ULTRA-STRICT POUR LA COMPARAISON
-  const playerXClean = cleanJid(game.playerX);
-  const playerOClean = cleanJid(game.playerO);
-  const currentTurnClean = cleanJid(game.currentTurn);
-  const senderClean = cleanJid(sender);
+  const senderId = extractUserId(sender);
+  const p1Id = extractUserId(game.playerX.jid);
+  const p2Id = extractUserId(game.playerO.jid);
 
-  // Vérification stricte du tour
-  if (senderClean !== currentTurnClean) {
-    await socket.sendMessage(from, { text: `⚠️ Ce n'est pas votre tour ! Attendez votre adversaire.` }, { quoted: msg });
-    return true; 
+  // Si l'auteur du message ne fait pas partie des joueurs, ignorer silencieusement pour ne pas perturber le groupe
+  if (senderId !== p1Id && senderId !== p2Id) {
+    return false;
   }
 
-  const index = move - 1;
-  if (game.board[index] !== null) {
-    await socket.sendMessage(from, { text: `🚫 Cette case est déjà occupée ! Choisissez un chiffre visible.` }, { quoted: msg });
+  const currentTurnId = extractUserId(game.currentTurn.jid);
+
+  // Vérification stricte du tour de jeu
+  if (senderId !== currentTurnId) {
+    await socket.sendMessage(from, {
+      text: `⏳ @${senderId}, ce n'est pas votre tour ! Veuillez attendre votre adversaire.`,
+      mentions: [normalizeJid(sender)]
+    }, { quoted: msg });
     return true;
   }
 
-  // Enregistrement du coup
-  game.board[index] = game.turnSymbol;
-  const result = checkWinner(game.board);
-  
-  const p1Tag = playerXClean.split('@')[0];
-  const p2Tag = playerOClean.split('@')[0];
+  const move = parseInt(rawText);
+  const index = move - 1;
 
-  if (result) {
-    let finalMessage = `🎮 *RETRO TIC-TAC-TOE* 🎮\n\n${renderBoard(game.board)}\n\n`;
-    if (result === 'tie') {
-      finalMessage += `🤝 *Match nul !* Bien joué à tous les deux.`;
-    } else {
-      const winnerJid = result === 'X' ? playerXClean : playerOClean;
-      finalMessage += `🎉 *Félicitations !* @${winnerJid.split('@')[0]} a gagné la partie ! 🏆`;
-    }
-    
-    await socket.sendMessage(from, { text: finalMessage, mentions: [playerXClean, playerOClean] }, { quoted: msg });
+  // Case déjà occupée
+  if (game.board[index] !== null) {
+    await socket.sendMessage(from, {
+      text: `🚫 *Case déjà occupée !* Choisissez un chiffre encore disponible sur la grille.`,
+      mentions: [game.playerX.jid, game.playerO.jid]
+    }, { quoted: msg });
+    return true;
+  }
+
+  // Application du coup
+  game.board[index] = game.turnSymbol;
+  const winner = checkWinner(game.board);
+
+  // Déclaration du résultat final
+  if (winner) {
+    if (game.timeout) clearTimeout(game.timeout);
     activeGames.delete(from);
+
+    let endText = `╭───「 🎮 *MORPION — RÉSULTAT* 」───\n│\n` +
+                  `${renderBoard(game.board)}\n│\n`;
+
+    if (winner === 'tie') {
+      endText += `│ 🤝 *MATCH NUL !*\n│ Belle égalité entre @${p1Id} et @${p2Id} !\n╰────────────────────────☉`;
+    } else {
+      const winnerPlayer = winner === 'X' ? game.playerX : game.playerO;
+      const loserPlayer = winner === 'X' ? game.playerO : game.playerX;
+      endText += `│ 🏆 *VICTOIRE ÉCRASANTE !*\n` +
+                 `│ 🎉 Gagnant : @${extractUserId(winnerPlayer.jid)} (${winner === 'X' ? '❌' : '⭕'})\n` +
+                 `│ 💀 Perdant : @${extractUserId(loserPlayer.jid)}\n╰────────────────────────☉`;
+    }
+
+    await socket.sendMessage(from, {
+      text: endText,
+      mentions: [game.playerX.jid, game.playerO.jid]
+    }, { quoted: msg });
     return true;
   }
 
   // Changement de tour
-  game.currentTurn = currentTurnClean === playerXClean ? playerOClean : playerXClean;
-  game.turnSymbol = game.turnSymbol === 'X' ? 'O' : 'X';
+  const nextPlayer = currentTurnId === p1Id ? game.playerO : game.playerX;
+  const nextSymbol = game.turnSymbol === 'X' ? 'O' : 'X';
 
-  const nextGameTemplate = 
-    `🎮 *RETRO TIC-TAC-TOE* 🎮\n\n` +
-    `${renderBoard(game.board)}\n\n` +
-    `❌ *Joueur 1 :* @${p1Tag}\n` +
-    `⭕ *Joueur 2 :* @${p2Tag}\n\n` +
-    `👉 *À toi de jouer :* @${game.currentTurn.split('@')[0]}\n` +
-    `📌 _Envoie simplement le chiffre de ton choix (1-9)._`;
+  game.currentTurn = nextPlayer;
+  game.turnSymbol = nextSymbol;
 
-  await socket.sendMessage(from, { text: nextGameTemplate, mentions: [playerXClean, playerOClean] }, { quoted: msg });
+  // Relancer le timer d'inactivité
+  resetGameTimeout(socket, from, game);
+
+  const nextText = `╭───「 🎮 *MORPION EN COURS* 」───\n│\n` +
+                   `${renderBoard(game.board)}\n│\n` +
+                   `│ ❌ *Joueur 1 :* @${p1Id}\n` +
+                   `│ ⭕ *Joueur 2 :* @${p2Id}\n│\n` +
+                   `│ 👉 *Au tour de :* @${extractUserId(nextPlayer.jid)} (${nextSymbol === 'X' ? '❌' : '⭕'})\n` +
+                   `│ 💡 _Envoyez un chiffre entre 1 et 9._\n` +
+                   `╰────────────────────────☉`;
+
+  await socket.sendMessage(from, {
+    text: nextText,
+    mentions: [game.playerX.jid, game.playerO.jid]
+  }, { quoted: msg });
+
   return true;
 }
 
 /**
- * INITIALISATION D'UNE PARTIE
+ * INITIALISATION D'UNE NOUVELLE PARTIE
  */
 async function startTicTacToe(socket, msg, from, sender, opponentJid) {
   if (!opponentJid) {
-    return await socket.sendMessage(from, { 
-      text: `❌ *Sélection de l'adversaire incorrecte.*\n\n📌 Mentionnez un joueur: *.ttt @user*\n📌 Ou répondez directement au message de votre adversaire avec *.ttt*` 
+    return await socket.sendMessage(from, {
+      text: `❌ *Adversaire non spécifié.*\n\n💡 *Exemples :*\n• Mentionner : \`.ttt @user\`\n• Répondre : Répondez au message de votre adversaire avec \`.ttt\``
     }, { quoted: msg });
   }
 
-  const finalSender = cleanJid(sender);
-  const finalOpponent = cleanJid(opponentJid);
+  const p1Id = extractUserId(sender);
+  const p2Id = extractUserId(opponentJid);
 
-  if (finalOpponent === finalSender) {
-    return await socket.sendMessage(from, { text: `🍁 Vous ne pouvez pas jouer contre vous-même !` }, { quoted: msg });
+  if (!p2Id) {
+    return await socket.sendMessage(from, {
+      text: `❌ Numéro d'adversaire introuvable.`
+    }, { quoted: msg });
   }
 
+  // Ne pas jouer contre soi-même
+  if (p1Id === p2Id) {
+    return await socket.sendMessage(from, {
+      text: `🍁 *Vous ne pouvez pas jouer au Morpion contre vous-même !* Défi un ami dans le groupe.`
+    }, { quoted: msg });
+  }
+
+  // Partie déjà en cours dans le chat
   if (activeGames.has(from)) {
-    return await socket.sendMessage(from, { text: `❌ Une partie est déjà active ici. Faites *.delttt* pour l'annuler.` }, { quoted: msg });
+    return await socket.sendMessage(from, {
+      text: `⚠️ *Une partie est déjà en cours dans ce salon.* Tapez \`.delttt\` pour l'annuler.`
+    }, { quoted: msg });
   }
 
-  activeGames.set(from, {
+  const playerX = { id: p1Id, jid: normalizeJid(sender) };
+  const playerO = { id: p2Id, jid: normalizeJid(opponentJid) };
+
+  const newGame = {
     board: Array(9).fill(null),
-    playerX: finalSender,       
-    playerO: finalOpponent,  
-    currentTurn: finalSender,   
-    turnSymbol: 'X'
-  });
+    playerX,
+    playerO,
+    currentTurn: playerX,
+    turnSymbol: 'X',
+    timeout: null
+  };
 
-  const p1Tag = finalSender.split('@')[0];
-  const p2Tag = finalOpponent.split('@')[0];
+  activeGames.set(from, newGame);
+  resetGameTimeout(socket, from, newGame);
 
-  const startTemplate = 
-    `🎮 *RETRO TIC-TAC-TOE — JEU LANCÉ !* 🎮\n\n` +
-    `❌ *Joueur 1 :* @${p1Tag}\n` +
-    `⭕ *Joueur 2 :* @${p2Tag}\n\n` +
-    `${renderBoard(Array(9).fill(null))}\n\n` +
-    `👉 @${p1Tag} commence ! Envoie un chiffre entre *1 et 9* directement sans préfixe.`;
+  const startText = `╭───「 🎮 *DUEL MORPION LANCÉ !* 」───\n│\n` +
+                    `${renderBoard(Array(9).fill(null))}\n│\n` +
+                    `│ ❌ *Joueur 1 :* @${p1Id}\n` +
+                    `│ ⭕ *Joueur 2 :* @${p2Id}\n│\n` +
+                    `│ 👉 *Premier coup :* @${p1Id} (❌)\n` +
+                    `│ 📌 Envoyez directement un chiffre (*1 à 9*) dans le chat.\n` +
+                    `╰────────────────────────☉`;
 
-  await socket.sendMessage(from, { text: startTemplate, mentions: [finalSender, finalOpponent] }, { quoted: msg });
+  await socket.sendMessage(from, {
+    text: startText,
+    mentions: [playerX.jid, playerO.jid]
+  }, { quoted: msg });
 }
 
+/**
+ * ANNULATION D'UNE PARTIE
+ */
 function deleteGame(from) {
   if (activeGames.has(from)) {
+    const game = activeGames.get(from);
+    if (game.timeout) clearTimeout(game.timeout);
     activeGames.delete(from);
     return true;
   }
