@@ -103,7 +103,7 @@ const config = {
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://test2_db_user:cSq3iGhurIFh9xpp@clusterrender.v8sosxk.mongodb.net/?appName=Clusterrender';
 const MONGO_DB = process.env.MONGO_DB || 'MUGIWARA_NO_PLAG'
 let mongoClient, mongoDB;
-let sessionsCol, numbersCol, adminsCol, newsletterCol, configsCol, newsletterReactsCol;
+let sessionsCol, numbersCol, adminsCol, newsletterCol, configsCol, newsletterReactsCol, stickerCommandsCol;
 
 async function initMongo() {
   try {
@@ -119,12 +119,15 @@ async function initMongo() {
   newsletterCol = mongoDB.collection('newsletter_list');
   configsCol = mongoDB.collection('configs');
   newsletterReactsCol = mongoDB.collection('newsletter_reacts');
+  // Alias de stickers : la clé est isolée par session (chaque bot a son propre espace).
+  stickerCommandsCol = mongoDB.collection('sticker_commands');
 
   await sessionsCol.createIndex({ number: 1 }, { unique: true });
   await numbersCol.createIndex({ number: 1 }, { unique: true });
   await newsletterCol.createIndex({ jid: 1 }, { unique: true });
   await newsletterReactsCol.createIndex({ jid: 1 }, { unique: true });
   await configsCol.createIndex({ number: 1 }, { unique: true });
+  await stickerCommandsCol.createIndex({ session: 1, mediaKey: 1 }, { unique: true });
   console.log('✅ Mongo initialized and collections ready');
 }
 
@@ -1186,7 +1189,7 @@ function setupCommandHandlers(socket, number) {
     msg.message = (type === 'ephemeralMessage') ? msg.message.ephemeralMessage.message : msg.message;
     
     // 3. Extraire le texte du message
-    const body = (type === 'conversation') ? msg.message.conversation
+    let body = (type === 'conversation') ? msg.message.conversation
       : (type === 'extendedTextMessage') ? msg.message.extendedTextMessage?.text
       : (type === 'imageMessage') ? msg.message.imageMessage?.caption
       : (type === 'videoMessage') ? msg.message.videoMessage?.caption
@@ -1309,7 +1312,56 @@ function setupCommandHandlers(socket, number) {
     }
     // --- FIN ANTI-TAG ---
 
-    // Si pas de texte, on ne peut pas traiter de commande
+    const commandPrefix = config.PREFIX || '.';
+    // Les stickers peuvent eux-mêmes être des commandes. La clé stable est celle
+    // publiée dans le message (fileSha256/fileEncSha256), jamais le JID du chat.
+    const unwrapMessage = (m) => {
+      if (!m) return null;
+      return m.ephemeralMessage?.message || m.viewOnceMessage?.message ||
+        m.viewOnceMessageV2?.message || m.documentWithCaptionMessage?.message || m;
+    };
+    const stickerKey = (m) => {
+      const s = unwrapMessage(m)?.stickerMessage;
+      if (!s) return null;
+      const value = s.fileSha256 || s.fileEncSha256 || s.mediaKey;
+      return value ? (Buffer.isBuffer(value) ? value.toString('base64') : String(value)) : null;
+    };
+    const quotedMessage = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage ||
+      msg.message?.imageMessage?.contextInfo?.quotedMessage ||
+      msg.message?.videoMessage?.contextInfo?.quotedMessage;
+    const currentStickerKey = stickerKey(msg.message);
+    const quotedStickerKey = stickerKey(quotedMessage);
+
+    // setcmd save : répondre au sticker et fournir la commande cible.
+    if (normalizedBody && normalizedBody.startsWith(commandPrefix) &&
+        normalizedBody.slice(commandPrefix.length).trim().toLowerCase().startsWith('setcmd')) {
+      const setArgs = normalizedBody.slice(commandPrefix.length).trim().split(/\s+/).slice(1);
+      if (setArgs[0]?.toLowerCase() === 'save') {
+        const target = setArgs.slice(1).join(' ').replace(/^\./, '').trim().toLowerCase();
+        if (!quotedStickerKey || !target) {
+          await socket.sendMessage(remoteJid, { text: `❌ Réponds à un sticker avec : ${commandPrefix}setcmd save <commande>` }, { quoted: msg });
+          return;
+        }
+        await stickerCommandsCol.updateOne(
+          { session: String(sessionId).replace(/[^0-9]/g, ''), mediaKey: quotedStickerKey },
+          { $set: { command: target, updatedAt: new Date() } }, { upsert: true }
+        );
+        await socket.sendMessage(remoteJid, { text: `✅ Sticker enregistré comme alias de *${target}*.` }, { quoted: msg });
+        return;
+      }
+    }
+
+    // Résolution avant le test du body : un sticker n'a normalement aucun texte.
+    if (currentStickerKey) {
+      const alias = await stickerCommandsCol.findOne({
+        session: String(sessionId).replace(/[^0-9]/g, ''), mediaKey: currentStickerKey
+      });
+      if (alias?.command) {
+        body = `${commandPrefix}${alias.command}`;
+      }
+    }
+
+    // Si pas de texte et aucun sticker connu, on ne peut pas traiter de commande
     if (!body || typeof body !== 'string') return;
     const tttFrom = remoteJid;
     const tttSender = msg.key.fromMe 
