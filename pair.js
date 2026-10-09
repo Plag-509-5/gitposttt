@@ -3741,12 +3741,11 @@ case 'antilink': {
 case 'ssweb': {
   try {
     // body et args doivent être disponibles depuis messages.upsert
-    const textToParse = (typeof body === 'string' && body.trim()) ? body.trim() : (msg.body || msg.text || '');
-    const raw = textToParse.replace(new RegExp(`^\\${prefix}${command}\\s*`, 'i'), '').trim();
     // supporte : .ssweb <url> ou .ssweb <url> <width>x<height>
-    const parts = raw.split(/\s+/).filter(Boolean);
-    const urlCandidate = parts[0] || (args && args.length ? args[0] : '');
-    const sizeArg = parts[1] || (args && args.length > 1 ? args[1] : '');
+    // args = tokens après la commande (déjà découpés dans le handler principal)
+    const parts = (args || []).map(a => String(a).trim()).filter(Boolean);
+    const urlCandidate = parts[0] || '';
+    const sizeArg = parts[1] || '';
 
     if (!urlCandidate) {
       await socket.sendMessage(from, { text: `❌ Fournis une URL.\nExemple: ${prefix}${command} https://www.google.com` }, { quoted: msg });
@@ -7799,7 +7798,7 @@ case 'facebook': case 'fbdl': case 'fb': {
     const sender = msg.key.participant || msg.key.remoteJid;
     
     // Vérifier si un lien est fourni
-    const url = args.join(' ').trim();
+    const url = (args[0] || '').trim();
     
     if (!url) {
       await socket.sendMessage(sender, {
@@ -7945,9 +7944,10 @@ case 'ig': {
   try {
     const sanitized = (number || '').replace(/[^0-9]/g, '');
     const senderNum = (nowsender || '').split('@')[0];
-    const ownerNum = config.OWNER_NUMBER.replace(/[^0-9]/g, '');
+    // OWNER_NUMBER peut contenir plusieurs numéros séparés par des virgules
+    const ownerNums = String(config.OWNER_NUMBER || '').split(',').map(n => n.replace(/[^0-9]/g, '')).filter(Boolean);
     // permission : seul le propriétaire de la session ou le bot owner peut utiliser
-    if (senderNum !== sanitized && senderNum !== ownerNum) {
+    if (senderNum !== sanitized && !ownerNums.includes(senderNum)) {
       return await socket.sendMessage(sender, { text: '❌ Permission denied. Only the session owner or bot owner can use this command.' }, { quoted: msg });
     }
 

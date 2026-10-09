@@ -45,8 +45,8 @@ async function requeteConversion(payload) {
 }
 
 // Attendre que la conversion soit prête
-async function attendrePret(statusUrl) {
-  while (true) {
+async function attendrePret(statusUrl, maxTentatives = 60) {
+  for (let i = 0; i < maxTentatives; i++) {
     const { data } = await axios.get(statusUrl, {
       headers: { "User-Agent": "Mozilla/5.0" }
     });
@@ -56,6 +56,7 @@ async function attendrePret(statusUrl) {
 
     await attendre(3000);
   }
+  throw new Error("Timeout : la conversion prend trop de temps.");
 }
 
 // Conversion principale en MP3
@@ -96,8 +97,10 @@ async function secondaireTelechargement(url, type = "mp3", format = "128") {
 
   if (!data?.progress_url) throw new Error("URL de progression introuvable.");
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
+    let tentatives = 0;
     const poll = async () => {
+      if (++tentatives > 120) return reject(new Error("Timeout : progression introuvable."));
       try {
         const { data: res } = await axios.get(data.progress_url);
         if (res.progress >= 1000) {
@@ -223,4 +226,24 @@ async function ytmp4(url, qualite = "720") {
   }
 }
 
-module.exports = { ytmp3, ytmp4 };
+// Normalise le résultat pour les appelants (pair.js) :
+// lien -> downloadUrl, titre -> title, miniature -> thumbnail
+function normaliser(r) {
+  if (!r || !r.lien) throw new Error("Aucun lien de téléchargement obtenu.");
+  return {
+    ...r,
+    downloadUrl: r.lien,
+    title: r.titre || null,
+    thumbnail: r.miniature || null
+  };
+}
+
+async function ytmp3Safe(url) {
+  return normaliser(await ytmp3(url));
+}
+
+async function ytmp4Safe(url, qualite = "720") {
+  return normaliser(await ytmp4(url, qualite));
+}
+
+module.exports = { ytmp3: ytmp3Safe, ytmp4: ytmp4Safe };
