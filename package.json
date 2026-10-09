@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "test:syntax": "node -e \"require('child_process').execSync('for f in *.js src/**/*.js; do node --check $f; done',{stdio:'inherit'})\"",
+    "test:api": "node scripts/api-smoke.js"
   },
   "dependencies": {
     "@blackamda/telegram-image-url": "1.0.0",

@@ -13,13 +13,25 @@ const axios = require('axios');
 const FileType = require('file-type');
 const fetch = require('node-fetch');
 const { MongoClient } = require('mongodb');
-const { loadPlugins } = require('./pluginLoader');
-const plugins = loadPlugins();
+const { loadPlugins, executePlugin, getPluginsByCategory, getAllPluginsList } = require('./src/core/pluginLoader');
+const { findStickerCommand, initStickerDb } = require('./src/features/sticker_cmd');
+const { findReactionCommand, initReactionDb } = require('./src/features/reaction_cmd');
+const {
+  modeAllowsChat,
+  unwrapMessage: unwrapAntideleteMessage,
+  resolveOriginalAuthor,
+  resolveRevoker,
+  resolveConversationName,
+  uniqueMentions,
+  buildAntideleteHeader,
+  sendRecoveredMessage
+} = require('./src/services/antidelete');
+const { resolveGroupSelection, actorIdFromMessage } = require('./src/services/group-status-selector');
+loadPlugins();
 const { sms, downloadMediaMessage } = require('./msg')
 const { startTicTacToe, handleTicTacToeMove, deleteGame } = require('./files/tictactoe');
 const { setupTranslationWrapper, saveSessionLanguage } = require('./files/translation');
 const { createStickerFromMedia, sendSticker } = require('./s-utils');
-const { ytmp3, ytmp4 } = require('./youtube');
 const { getGroupAdminsInfo, jidToNumber } = require('./normalize');
 const { uploadFile: uploadCloudku } = require("cloudku-uploader");
 const FormData = require("form-data");
@@ -118,6 +130,8 @@ async function initMongo() {
   adminsCol = mongoDB.collection('admins');
   newsletterCol = mongoDB.collection('newsletter_list');
   configsCol = mongoDB.collection('configs');
+  await initStickerDb(mongoDB).catch(() => {});
+  await initReactionDb(mongoDB).catch(() => {});
   newsletterReactsCol = mongoDB.collection('newsletter_reacts');
 
   await sessionsCol.createIndex({ number: 1 }, { unique: true });
@@ -503,45 +517,80 @@ const activeSockets = new Map();
 const socketCreationTime = new Map();
 
 const otpStore = new Map();
+// Numéros propriétaires : OWNER_NUMBER peut contenir plusieurs numéros séparés par des virgules
+const OWNER_NUMBERS = String(config.OWNER_NUMBER || '').split(',').map(n => n.replace(/[^0-9]/g, '')).filter(Boolean);
+
 // ============================================================
 // ANTIDELETE STORE — Store en mémoire par session
 // ============================================================
 const messageStores = new Map(); // sessionNumber → Map<msgId, msgObject>
+const messageStoreTimes = new Map(); // sessionNumber → Map<msgId, storedAt>
 
-const STORE_MAX_PER_SESSION = 500;  // quota max par session
-const STORE_CLEAN_INTERVAL  = 20 * 60 * 1000; // nettoyage toutes les 20 min
+const STORE_MAX_PER_SESSION = Math.max(500, Number(process.env.ANTIDELETE_STORE_MAX) || 1500);
+const STORE_RETENTION_MS = Math.max(20 * 60 * 1000, Number(process.env.ANTIDELETE_RETENTION_MS) || 24 * 60 * 60 * 1000);
+const STORE_CLEAN_INTERVAL = 20 * 60 * 1000;
 
 function getSessionStore(sessionNumber) {
-  if (!messageStores.has(sessionNumber)) {
-    messageStores.set(sessionNumber, new Map());
-  }
+  if (!messageStores.has(sessionNumber)) messageStores.set(sessionNumber, new Map());
+  if (!messageStoreTimes.has(sessionNumber)) messageStoreTimes.set(sessionNumber, new Map());
   return messageStores.get(sessionNumber);
+}
+
+function deleteStoredMessage(sessionNumber, msgId) {
+  getSessionStore(sessionNumber).delete(msgId);
+  messageStoreTimes.get(sessionNumber)?.delete(msgId);
+}
+
+function clearSessionStore(sessionNumber) {
+  getSessionStore(sessionNumber).clear();
+  messageStoreTimes.get(sessionNumber)?.clear();
 }
 
 function storeMessage(sessionNumber, msg) {
   if (!msg?.key?.id || !msg?.message) return;
-  const store = getSessionStore(sessionNumber);
+  // Un protocole REVOKE décrit une suppression : ce n'est pas le message
+  // original et il ne doit jamais remplacer une entrée du store.
+  if (unwrapAntideleteMessage(msg.message).message?.protocolMessage?.type === 0) return;
 
-  // Quota dépassé → vider les 100 plus anciens
-  if (store.size >= STORE_MAX_PER_SESSION) {
-    const keys = [...store.keys()].slice(0, 100);
-    keys.forEach(k => store.delete(k));
+  const store = getSessionStore(sessionNumber);
+  const times = messageStoreTimes.get(sessionNumber);
+
+  // Quota dépassé → supprimer les entrées les plus anciennes sans vider les
+  // conversations récentes. Les objets Baileys ne contiennent pas les buffers.
+  while (store.size >= STORE_MAX_PER_SESSION) {
+    const oldestKey = store.keys().next().value;
+    if (!oldestKey) break;
+    store.delete(oldestKey);
+    times.delete(oldestKey);
   }
 
+  // Réinsérer actualise aussi l'ordre LRU de la Map.
+  store.delete(msg.key.id);
   store.set(msg.key.id, msg);
+  times.set(msg.key.id, Date.now());
 }
 
 function getStoredMessage(sessionNumber, msgId) {
   return getSessionStore(sessionNumber).get(msgId) || null;
 }
 
-// Nettoyage automatique toutes les 20 min
-setInterval(() => {
+// Nettoyage par TTL : l'ancien code vidait tout toutes les 20 minutes, ce qui
+// rendait impossible la récupération d'un message supprimé plus tard.
+const antideleteCleaner = setInterval(() => {
+  const expiresBefore = Date.now() - STORE_RETENTION_MS;
   for (const [sessionNumber, store] of messageStores.entries()) {
-    store.clear();
-    console.log(`[ANTIDELETE] Store nettoyé pour session ${sessionNumber}`);
+    const times = messageStoreTimes.get(sessionNumber) || new Map();
+    let removed = 0;
+    for (const [msgId, storedAt] of times.entries()) {
+      if (storedAt > expiresBefore) continue;
+      store.delete(msgId);
+      times.delete(msgId);
+      removed += 1;
+    }
+    if (removed) console.log(`[ANTIDELETE] ${removed} ancien(s) message(s) nettoyé(s) pour ${sessionNumber}`);
   }
 }, STORE_CLEAN_INTERVAL);
+antideleteCleaner.unref?.();
 
 // ---------------- helpers kept/adapted ----------------
 
@@ -869,129 +918,131 @@ async function robustDownload(messageObj, downloader) {
 }
 async function handleMessageRevocation(socket, number) {
   const sanitized = String(number || '').replace(/[^0-9]/g, '');
-  const ownerJid  = `${sanitized}@s.whatsapp.net`;
+  const ownerJid = `${sanitized}@s.whatsapp.net`;
+  const pendingDeletes = new Map();
+  const inFlight = new Set();
+  const processed = new Map();
 
-  // ── Baileys émet parfois messages.delete ──
-  socket.ev.on('messages.delete', async ({ keys }) => {
-    if (!keys?.length) return;
-    for (const key of keys) {
-      try {
-        await processRevoke(sanitized, ownerJid, socket, key.id, key.remoteJid, key.participant);
-      } catch(e) { console.error('[AD messages.delete]', e); }
+  const eventId = key => `${key?.remoteJid || ''}:${key?.id || ''}`;
+  const alreadyProcessed = id => {
+    const timestamp = processed.get(id);
+    if (!timestamp) return false;
+    if (Date.now() - timestamp > 5 * 60 * 1000) {
+      processed.delete(id);
+      return false;
+    }
+    return true;
+  };
+  const markProcessed = id => {
+    processed.set(id, Date.now());
+    while (processed.size > 1000) processed.delete(processed.keys().next().value);
+  };
+
+  const run = async (revokedKey, revokeMessage = null) => {
+    if (!revokedKey?.id) return;
+    const id = eventId(revokedKey);
+    if (alreadyProcessed(id) || inFlight.has(id)) return;
+    inFlight.add(id);
+    try {
+      const result = await processRevoke({
+        sanitized,
+        ownerJid,
+        socket,
+        revokedKey,
+        revokeMessage
+      });
+      if (result !== 'not_found' && result !== 'error') markProcessed(id);
+    } finally {
+      inFlight.delete(id);
+    }
+  };
+
+  // messages.delete ne fournit généralement pas l'identité de la personne qui
+  // a supprimé. On attend brièvement le protocolMessage REVOKE, plus complet.
+  socket.ev.on('messages.delete', ({ keys }) => {
+    for (const key of keys || []) {
+      if (!key?.id) continue;
+      const id = eventId(key);
+      if (pendingDeletes.has(id) || alreadyProcessed(id)) continue;
+      const timer = setTimeout(() => {
+        pendingDeletes.delete(id);
+        run(key).catch(error => console.error('[AD messages.delete]', error));
+      }, 1000);
+      timer.unref?.();
+      pendingDeletes.set(id, timer);
     }
   });
 
-  // ── Mais surtout il émet messages.upsert avec protocolMessage REVOKE ──
+  // Le message protocolaire permet de distinguer la clé du message original
+  // (protocolMessage.key) de la personne ayant réellement révoqué (m.key).
   socket.ev.on('messages.upsert', async ({ messages }) => {
-    for (const m of messages) {
+    for (const revokeMessage of messages || []) {
       try {
-        if (m?.message?.protocolMessage?.type !== 0) continue; // type 0 = REVOKE
-        const revokedKey = m.message.protocolMessage.key;
-        if (!revokedKey?.id) continue;
-        await processRevoke(
-          sanitized, ownerJid, socket,
-          revokedKey.id,
-          revokedKey.remoteJid || m.key.remoteJid,
-          revokedKey.participant || m.key.participant
-        );
-      } catch(e) { console.error('[AD messages.upsert REVOKE]', e); }
+        const protocol = unwrapAntideleteMessage(revokeMessage?.message).message?.protocolMessage;
+        if (protocol?.type !== 0 || !protocol.key?.id) continue;
+        const revokedKey = {
+          ...protocol.key,
+          remoteJid: protocol.key.remoteJid || revokeMessage.key?.remoteJid
+        };
+        const id = eventId(revokedKey);
+        const pending = pendingDeletes.get(id);
+        if (pending) {
+          clearTimeout(pending);
+          pendingDeletes.delete(id);
+        }
+        await run(revokedKey, revokeMessage);
+      } catch (error) {
+        console.error('[AD messages.upsert REVOKE]', error);
+      }
     }
   });
 }
 
-// ── Fonction centrale de traitement ──
-// ── Fonction centrale de traitement Antidelete Corrigée ──
-async function processRevoke(sanitized, ownerJid, socket, msgId, chatId, participant) {
+async function processRevoke({ sanitized, ownerJid, socket, revokedKey, revokeMessage }) {
+  const msgId = revokedKey?.id;
+  const chatId = revokedKey?.remoteJid || revokeMessage?.key?.remoteJid;
+  if (!msgId || !chatId) return 'invalid';
+
   try {
     const cfg = await loadUserConfigFromMongo(sanitized) || {};
+    if (!modeAllowsChat(cfg.antidelete, chatId)) return 'ignored';
 
-    // 1. Vérification si l'antidelete est activé
-    if (!cfg.antidelete || cfg.antidelete === 'off') return;
-
-    const mode = cfg.antidelete; // 'all' | 'g' | 'p' | true
-    const isGroup   = (chatId || '').endsWith('@g.us');
-    const isPrivate = (chatId || '').endsWith('@s.whatsapp.net');
-
-    // Filtres selon la configuration
-    if (mode === 'g' && !isGroup) return; 
-    if (mode === 'p' && !isPrivate) return; 
-
-    // 2. Récupération du message original depuis la mémoire
     const deletedMsg = getStoredMessage(sanitized, msgId);
     if (!deletedMsg) {
       console.warn(`[ANTIDELETE] ${msgId} non trouvé dans le store (session ${sanitized})`);
-      return;
+      return 'not_found';
     }
 
-    // Infos de l'expéditeur et contexte
-    const senderNum    = (participant || chatId || '').split('@')[0];
-    const deletionTime = getHaitiTimestamp();
-    const contextInfo  = isGroup ? `👥 *Groupe :* ${chatId}\n` : `💬 *Privé :* ${senderNum}\n`;
-
-    // 3. Déballage récursif (Vue Unique, Éphémère, etc.)
-    let m = deletedMsg.message;
-    let isViewOnce = false;
-
-    while (m && (m.ephemeralMessage || m.viewOnceMessage || m.viewOnceMessageV2 || m.viewOnceMessageV2Extension || m.documentWithCaptionMessage)) {
-      if (m.viewOnceMessage || m.viewOnceMessageV2 || m.viewOnceMessageV2Extension) {
-        isViewOnce = true;
-      }
-      m = m.ephemeralMessage?.message 
-       || m.viewOnceMessage?.message 
-       || m.viewOnceMessageV2?.message 
-       || m.viewOnceMessageV2Extension?.message 
-       || m.documentWithCaptionMessage?.message;
-    }
-
-    if (!m) {
-      console.warn(`[ANTIDELETE] Impossible de déballer la structure du message ${msgId}`);
-      return;
-    }
-
-    // ASTUCE VUE UNIQUE : On désactive le drapeau viewOnce pour que copyNForward l'envoie normalement
-    if (m.imageMessage) m.imageMessage.viewOnce = false;
-    if (m.videoMessage) m.videoMessage.viewOnce = false;
-
-    // On remplace le message d'origine par le message déballé et nettoyé
-    deletedMsg.message = m;
-
-    // En-tête d'avertissement envoyé en privé au propriétaire (ownerJid)
-    let header = `╭━━━━━━━━━━━━━━━━━━╮\n` +
-                 `┃  🗑️ *ANTIDELETE*\n` +
-                 `╰━━━━━━━━━━━━━━━━━━╯\n\n` +
-                 `👤 *Auteur :* @${senderNum}\n` +
-                 `${contextInfo}` +
-                 `⏰ *Heure  :* ${deletionTime}\n` +
-                 `${isViewOnce ? '👁️ *Type d\'origine :* Vue Unique (Convertie)\n' : ''}` +
-                 `━━━━━━━━━━━━━━━━━━\n` +
-                 `👇 *Message retransmis ci-dessous :*`;
-
-    // Envoi de l'alerte d'en-tête en privé
-    await socket.sendMessage(ownerJid, {
-      text: header,
-      mentions: [participant || chatId]
+    const authorJid = resolveOriginalAuthor(deletedMsg, chatId, ownerJid);
+    const revokerJid = resolveRevoker(revokeMessage, chatId, ownerJid, authorJid);
+    const conversationName = await resolveConversationName(socket, chatId, deletedMsg, revokeMessage);
+    const { isViewOnce } = unwrapAntideleteMessage(deletedMsg.message);
+    const mentions = uniqueMentions(revokerJid, authorJid);
+    const header = buildAntideleteHeader({
+      revokerJid,
+      authorJid,
+      conversationName,
+      timestamp: getHaitiTimestamp(),
+      isViewOnce
     });
 
-    // 4. Retransmission directe avec copyNForward vers votre privé (ownerJid)
-    if (typeof socket.copyNForward === 'function') {
-      await socket.copyNForward(ownerJid, deletedMsg, true);
-    } else {
-      // Option de secours si la fonction porte un autre nom dans votre structure
-      await socket.sendMessage(ownerJid, { forward: deletedMsg });
-    }
+    await sendRecoveredMessage({
+      socket,
+      ownerJid,
+      storedMessage: deletedMsg,
+      header,
+      mentions,
+      downloadContent: downloadContentFromMessage
+    });
 
-    // 5. Nettoyage de la mémoire du store pour ce message
-    const sessionStore = getSessionStore(sanitized);
-    if (sessionStore && sessionStore.has(msgId)) {
-      sessionStore.delete(msgId);
-    }
-
-  } catch (globalError) {
-    console.error('[ANTIDELETE FATAL ERROR] :', globalError);
+    deleteStoredMessage(sanitized, msgId);
+    return 'recovered';
+  } catch (error) {
+    // Conserver l'entrée pour permettre une nouvelle tentative si le réseau ou
+    // le téléchargement du média a échoué temporairement.
+    console.error('[ANTIDELETE FATAL ERROR]', error);
+    return 'error';
   }
-
-  // Supprimer du store après traitement
-  getSessionStore(sanitized).delete(msgId);
 }
 
 function generateTS() { return Math.floor(Date.now() / 1000); }
@@ -1168,7 +1219,7 @@ function setupCommandHandlers(socket, number) {
     const msg = messages[0];
     // ── STORE tous les messages pour antidelete ──
   for (const m of messages) {
-    if (m?.key?.id && m?.message && !m.key.fromMe) {
+    if (m?.key?.id && m?.message && modeAllowsChat('all', m.key.remoteJid)) {
       storeMessage(number, m);
     }
   }
@@ -1186,7 +1237,7 @@ function setupCommandHandlers(socket, number) {
     msg.message = (type === 'ephemeralMessage') ? msg.message.ephemeralMessage.message : msg.message;
     
     // 3. Extraire le texte du message
-    const body = (type === 'conversation') ? msg.message.conversation
+    let body = (type === 'conversation') ? msg.message.conversation
       : (type === 'extendedTextMessage') ? msg.message.extendedTextMessage?.text
       : (type === 'imageMessage') ? msg.message.imageMessage?.caption
       : (type === 'videoMessage') ? msg.message.videoMessage?.caption
@@ -1309,6 +1360,114 @@ function setupCommandHandlers(socket, number) {
     }
     // --- FIN ANTI-TAG ---
 
+    // ── Identifiant de la session (numéro nettoyé) pour les alias et plugins ──
+    const aliasSessionId = String(number || socket.user?.id?.split(':')[0] || '').replace(/[^0-9]/g, '');
+
+    // ── .swgc : choix du groupe cible par réponse numérique en privé ──
+    if (!remoteJid.endsWith('@g.us') && /^\d+$/.test(normalizedBody)) {
+      const selectionActor = actorIdFromMessage(socket, msg, remoteJid);
+      const selection = resolveGroupSelection(sessionId, selectionActor, normalizedBody);
+      if (selection.status !== 'none') {
+        const selPrefix = config.PREFIX || '.';
+        if (selection.status === 'selected') {
+          await socket.sendMessage(remoteJid, {
+            text: `✅ Groupe ciblé : *${selection.group.subject}*\n\nTu peux maintenant utiliser ${selPrefix}swgc <texte> ou répondre à un média avec ${selPrefix}swgc.`
+          }, { quoted: msg });
+        } else if (selection.status === 'invalid') {
+          await socket.sendMessage(remoteJid, {
+            text: `❌ Choix invalide. Réponds avec un numéro entre ${selection.min} et ${selection.max}.`
+          }, { quoted: msg });
+        } else if (selection.status === 'expired') {
+          await socket.sendMessage(remoteJid, {
+            text: `⌛ La sélection a expiré. Relance ${selPrefix}swgc.`
+          }, { quoted: msg });
+        }
+        return;
+      }
+    }
+
+    // ── Alias sticker → commande : le sticker remplace le texte de commande ──
+    const stickerMsgObj = msg.message?.stickerMessage;
+    if (stickerMsgObj) {
+      const matchedSticker = findStickerCommand(stickerMsgObj, aliasSessionId);
+      if (matchedSticker?.command) {
+        body = `${config.PREFIX || '.'}${matchedSticker.command}`;
+        console.log(`🎯 [STICKER-CMD] Sticker reconnu → ${body}`);
+        const ctxInfo = stickerMsgObj.contextInfo || msg.message?.extendedTextMessage?.contextInfo;
+        if (ctxInfo) {
+          if (!msg.message.extendedTextMessage) {
+            msg.message.extendedTextMessage = { text: body, contextInfo: ctxInfo };
+          } else {
+            msg.message.extendedTextMessage.contextInfo = { ...ctxInfo, ...msg.message.extendedTextMessage.contextInfo };
+          }
+        }
+      }
+    }
+
+    // ── Alias réaction emoji → commande (plugins uniquement) ──
+    const reactionMsg = msg.message?.reactionMessage;
+    if (reactionMsg?.text) {
+      const matchedReact = findReactionCommand(reactionMsg.text, aliasSessionId);
+      if (matchedReact?.command) {
+        const targetKey = reactionMsg.key || {};
+        const targetChat = targetKey.remoteJid || remoteJid;
+        const targetMsg = getStoredMessage(number, targetKey.id);
+        const reactorJid = msg.key.fromMe
+          ? `${aliasSessionId}@s.whatsapp.net`
+          : (msg.key.participant || remoteJid);
+        const reactorNumber = reactorJid.split('@')[0].split(':')[0];
+        const reactorIsAllowed = reactorNumber === aliasSessionId || OWNER_NUMBERS.includes(reactorNumber);
+        if (cfg.MODE === 'private' && !reactorIsAllowed) return;
+
+        const fullBody = `${config.PREFIX || '.'}${matchedReact.command}`;
+        const cmdName = matchedReact.command.split(' ')[0].toLowerCase();
+        const cmdArgs = matchedReact.command.split(' ').slice(1);
+        const quotedPayload = targetMsg?.message || null;
+        const quotedParticipant = targetMsg?.key?.participant || targetKey.participant || targetKey.remoteJid;
+
+        const handled = await executePlugin(cmdName, {
+          socket,
+          msg: {
+            key: {
+              remoteJid: targetChat,
+              fromMe: msg.key.fromMe,
+              id: msg.key.id || `REACT_CMD_${Date.now()}`,
+              participant: reactorJid
+            },
+            message: {
+              extendedTextMessage: {
+                text: fullBody,
+                contextInfo: { stanzaId: targetKey.id, participant: quotedParticipant, quotedMessage: quotedPayload }
+              }
+            },
+            quoted: targetMsg ? { msg: targetMsg.message, sender: quotedParticipant, id: targetKey.id } : null
+          },
+          from: targetChat,
+          sender: reactorJid,
+          senderNumber: reactorNumber,
+          pushName: msg.pushName || '',
+          sessionNumber: aliasSessionId,
+          args: cmdArgs,
+          body: fullBody,
+          command: cmdName,
+          prefix: config.PREFIX || '.',
+          isOwner: OWNER_NUMBERS.includes(reactorNumber),
+          isSessionOwner: reactorNumber === aliasSessionId,
+          isSudo: false,
+          isPrivileged: reactorIsAllowed,
+          config,
+          sessionCfg: cfg,
+          quoted: quotedPayload,
+          quotedMsg: quotedPayload,
+          quotedSender: quotedParticipant,
+          activeSockets,
+          getPluginsByCategory,
+          getAllPluginsList
+        });
+        if (handled) return;
+      }
+    }
+
     // Si pas de texte, on ne peut pas traiter de commande
     if (!body || typeof body !== 'string') return;
     const tttFrom = remoteJid;
@@ -1335,7 +1494,7 @@ function setupCommandHandlers(socket, number) {
       : (msg.key.participant || remoteJid);
     const senderNumber = (nowsender || '').split('@')[0];
     const botNumber = socket.user.id ? socket.user.id.split(':')[0] : '';
-    const isOwner = senderNumber === config.OWNER_NUMBER.replace(/[^0-9]/g, '');
+    const isOwner = OWNER_NUMBERS.includes(senderNumber);
     try {
       // On récupère la configuration de la session en utilisant le botNumber (nettoyé de manière sûre)
       const sanitizedBot = String(botNumber || '').replace(/[^0-9]/g, '');
@@ -1381,6 +1540,31 @@ function setupCommandHandlers(socket, number) {
     }
 
     if (!command) return;
+
+    // ── Plugins (plugins/ et src/plugins/) : commandes et alias, prioritaires sur le switch ──
+    const pluginHandled = await executePlugin(command, {
+      socket,
+      msg,
+      from,
+      sender,
+      senderNumber,
+      pushName: msg.pushName || '',
+      sessionNumber: aliasSessionId,
+      args,
+      body,
+      command,
+      prefix,
+      isOwner,
+      isSessionOwner: senderNumber === aliasSessionId,
+      isSudo: false,
+      isPrivileged: isOwner || senderNumber === aliasSessionId,
+      config,
+      sessionCfg: cfg,
+      activeSockets,
+      getPluginsByCategory,
+      getAllPluginsList
+    });
+    if (pluginHandled) return;
 
     try {
       switch (command) {
@@ -3737,107 +3921,7 @@ case 'antilink': {
 }
 
 
-// ---------------- CASE ssweb (robuste) ----------------
-case 'ssweb': {
-  try {
-    // body et args doivent être disponibles depuis messages.upsert
-    // supporte : .ssweb <url> ou .ssweb <url> <width>x<height>
-    // args = tokens après la commande (déjà découpés dans le handler principal)
-    const parts = (args || []).map(a => String(a).trim()).filter(Boolean);
-    const urlCandidate = parts[0] || '';
-    const sizeArg = parts[1] || '';
-
-    if (!urlCandidate) {
-      await socket.sendMessage(from, { text: `❌ Fournis une URL.\nExemple: ${prefix}${command} https://www.google.com` }, { quoted: msg });
-      break;
-    }
-
-    // Normaliser l'URL
-    let url = urlCandidate.trim();
-    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-
-    // Parse taille si fournie (ex: 1920x1080)
-    let width = 1280, height = 720;
-    if (sizeArg && /^\d+x\d+$/i.test(sizeArg)) {
-      const [w, h] = sizeArg.split('x').map(n => parseInt(n, 10));
-      if (Number.isFinite(w) && Number.isFinite(h)) {
-        width = Math.min(Math.max(w, 200), 3840); // bornes raisonnables
-        height = Math.min(Math.max(h, 200), 2160);
-      }
-    }
-
-    // Réaction "en cours"
-    try { await socket.sendMessage(from, { react: { text: "⏳", key: msg.key } }); } catch (e) {}
-
-    // Appel API avec timeout
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000); // 20s timeout
-
-    const apiUrl = `https://www.movanest.xyz/v2/ssweb?url=${encodeURIComponent(url)}&width=${width}&height=${height}&full_page=true`;
-    const apiRes = await fetch(apiUrl, { method: 'GET', headers: { Accept: 'application/json' }, signal: controller.signal });
-    clearTimeout(timeout);
-
-    if (!apiRes.ok) {
-      const txt = await apiRes.text().catch(() => '');
-      console.error('SSWEB HTTP ERROR', apiRes.status, txt);
-      await socket.sendMessage(from, { text: "❌ Erreur réseau lors de l'appel à l'API." }, { quoted: msg });
-      break;
-    }
-
-    const apiData = await apiRes.json().catch(() => null);
-    const imageUrl = apiData?.result || apiData?.url || apiData?.data || null;
-
-    if (!imageUrl || typeof imageUrl !== 'string') {
-      console.error('SSWEB BAD RESPONSE', apiData);
-      await socket.sendMessage(from, { text: "❌ Impossible de générer la capture d'écran (réponse inattendue)." }, { quoted: msg });
-      break;
-    }
-
-    // Télécharger l'image retournée par l'API (buffer)
-    try {
-      const controller2 = new AbortController();
-      const timeout2 = setTimeout(() => controller2.abort(), 20000);
-      const imgRes = await fetch(imageUrl, { method: 'GET', signal: controller2.signal });
-      clearTimeout(timeout2);
-
-      if (!imgRes.ok) {
-        console.error('SSWEB IMAGE HTTP ERROR', imgRes.status);
-        // fallback : envoyer l'URL si l'envoi en buffer échoue
-        await socket.sendMessage(from, { text: `✅ Capture prête mais impossible de télécharger l'image. Voici le lien :\n${imageUrl}` }, { quoted: msg });
-        break;
-      }
-
-      const contentType = imgRes.headers.get('content-type') || '';
-      if (!/^image\//i.test(contentType)) {
-        console.error('SSWEB IMAGE NOT IMAGE', contentType);
-        await socket.sendMessage(from, { text: `❌ L'API n'a pas renvoyé une image valide.` }, { quoted: msg });
-        break;
-      }
-
-      const arrayBuffer = await imgRes.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-
-      // Envoi de l'image en buffer
-      await socket.sendMessage(from, { image: buffer, caption: `✅ Capture de ${url}` }, { quoted: msg });
-
-    } catch (e) {
-      console.error('SSWEB DOWNLOAD IMAGE ERROR', e);
-      // fallback : envoyer l'URL si téléchargement échoue
-      await socket.sendMessage(from, { text: `✅ Capture prête mais impossible de télécharger l'image. Voici le lien :\n${imageUrl}` }, { quoted: msg });
-    }
-
-    // Réaction "ok"
-    try { await socket.sendMessage(from, { react: { text: "☑️", key: msg.key } }); } catch (e) {}
-
-  } catch (err) {
-    console.error("SSWEB ERROR:", err);
-    try { await socket.sendMessage(from, { react: { text: "❌", key: msg.key } }); } catch (e) {}
-    await socket.sendMessage(from, { text: "❌ Erreur lors de la génération de la capture d'écran." }, { quoted: msg });
-  }
-  break;
-}
-   
- case 'checkban': {
+case 'checkban': {
   try {
     const target = (args[0] || '').replace(/[^0-9]/g, '');
     if (!target) {
@@ -7217,154 +7301,6 @@ ${kickLines}
                 break;
             }
 
-            // ============ PLAY YOUTUBE ============
-            // ============================================================
-// YOUTUBE PLAY / MP3 / MP4
-// ============================================================
-case 'play':
-case 'playaudio':
-case 'playvideo':
-case 'playptt': {
-  try {
-    if (!args.length) {
-      await socket.sendMessage(sender, {
-        text:
-          `╭━━━━━━━━━━━━━━━━━━╮\n` +
-          `┃  🎵 *KAIDO YOUTUBE*\n` +
-          `╰━━━━━━━━━━━━━━━━━━╯\n\n` +
-          `❌ Aucun titre ou lien fourni !\n\n` +
-          `📌 Exemple :\n` +
-          `${prefix}play alan walker faded\n` +
-          `${prefix}playvideo https://youtu.be/xxxxx\n\n` +
-          `> ${config.BOT_FOOTER}`
-      }, { quoted: msg });
-      break;
-    }
-
-    const query = args.join(' ');
-
-    await socket.sendMessage(from, {
-      react: { text: '⏳', key: msg.key }
-    });
-
-    let url = query;
-    let title = 'YouTube Media';
-    let thumbnail = 'https://i.ytimg.com/vi_webp/default.webp';
-
-    // Recherche YouTube si ce n'est pas un lien
-    if (!query.startsWith('http')) {
-      const search = await yts(query);
-
-      if (!search.videos.length) {
-        throw new Error('Aucun résultat trouvé.');
-      }
-
-      url = search.videos[0].url;
-      title = search.videos[0].title;
-      thumbnail = search.videos[0].thumbnail;
-    }
-
-    // PLAY = menu boutons
-    if (command === 'play') {
-      const buttons = [
-        {
-          buttonId: `${prefix}playaudio ${url}`,
-          buttonText: { displayText: '🎵 AUDIO' },
-          type: 1
-        },
-        {
-          buttonId: `${prefix}playvideo ${url}`,
-          buttonText: { displayText: '🎬 VIDEO' },
-          type: 1
-        },
-        {
-          buttonId: `${prefix}playptt ${url}`,
-          buttonText: { displayText: '🎤 PTT' },
-          type: 1
-        }
-      ];
-
-      await socket.sendMessage(sender, {
-        image: { url: thumbnail },
-        caption:
-          `╭━━━━━━━━━━━━━━━━━━╮\n` +
-          `┃  🎵 *KAIDO YOUTUBE*\n` +
-          `╰━━━━━━━━━━━━━━━━━━╯\n\n` +
-          `📌 ${title}\n\n` +
-          `Choisis un format ci-dessous :`,
-        footer: config.BOT_FOOTER,
-        buttons,
-        headerType: 4
-      }, { quoted: msg });
-
-      break;
-    }
-
-    // AUDIO / PTT
-    if (command === 'playaudio' || command === 'playptt') {
-      const data = await ytmp3(url);
-
-      await socket.sendMessage(sender, {
-        audio: { url: data.downloadUrl },
-        mimetype: 'audio/mpeg',
-        ptt: command === 'playptt',
-        contextInfo: {
-          externalAdReply: {
-            title: data.title || title,
-            body: 'KAIDO YTMP3',
-            thumbnailUrl: data.thumbnail || thumbnail,
-            mediaType: 1,
-            sourceUrl: url,
-            renderLargerThumbnail: true
-          }
-        }
-      }, { quoted: msg });
-
-      await socket.sendMessage(from, {
-        react: { text: '✅', key: msg.key }
-      });
-
-      break;
-    }
-
-    // VIDEO
-    if (command === 'playvideo') {
-      const data = await ytmp4(url, '720');
-
-      await socket.sendMessage(sender, {
-        video: { url: data.downloadUrl },
-        caption:
-          `🎬 *${data.title || title}*\n\n` +
-          `📺 Qualité : 720p\n` +
-          `> ${config.BOT_FOOTER}`,
-        mimetype: 'video/mp4'
-      }, { quoted: msg });
-
-      await socket.sendMessage(from, {
-        react: { text: '✅', key: msg.key }
-      });
-
-      break;
-    }
-
-  } catch (e) {
-    console.error('[YOUTUBE ERROR]', e);
-
-    await socket.sendMessage(from, {
-      react: { text: '❌', key: msg.key }
-    });
-
-    await socket.sendMessage(sender, {
-      text:
-        `╭━━━━━━━━━━━━━━━━━━╮\n` +
-        `┃  ❌ *YOUTUBE ERROR*\n` +
-        `╰━━━━━━━━━━━━━━━━━━╯\n\n` +
-        `${e.message || e}\n\n` +
-        `💡 Réessaie avec un autre lien.`
-    }, { quoted: msg });
-  }
-  break;
-}
             // ============ COMMANDE INCONNUE ============
 // === COMMANDE UPSCALE (amélioration d'image) ===
 // === COMMANDE UPSCALE (amélioration d'image) ===
@@ -7789,281 +7725,6 @@ case 'bots': {
 }
 
 
-// === COMMANDE FACEBOOK DOWNLOADER ===
-// === COMMANDE FACEBOOK DOWNLOADER ===
-case 'facebook': case 'fbdl': case 'fb': {
-  try {
-    // Définir jid à partir de remoteJid (disponible dans ton contexte)
-    const jid = remoteJid; // ou msg.key.remoteJid selon ce qui est disponible
-    const sender = msg.key.participant || msg.key.remoteJid;
-    
-    // Vérifier si un lien est fourni
-    const url = (args[0] || '').trim();
-    
-    if (!url) {
-      await socket.sendMessage(sender, {
-        text: `❌ Exemple: ${prefix}${command} https://fb.watch/xxxxxx/`
-      }, { quoted: msg });
-      break;
-    }
-
-    // Vérifier que c'est un lien Facebook valide
-    if (!url.match(/(?:https?:\/\/)?(?:www\.)?(?:facebook\.com|fb\.watch)\/.*/i)) {
-      await socket.sendMessage(sender, {
-        text: '❌ Lien Facebook invalide. Utilise un lien comme: https://fb.watch/xxxxxx/'
-      }, { quoted: msg });
-      break;
-    }
-
-    // Réaction d'attente
-    await socket.sendMessage(jid, { react: { text: "⏳", key: msg.key } });
-    await socket.sendMessage(sender, { text: '🔄 Téléchargement en cours...' }, { quoted: msg });
-
-    // Appel à l'API fdownloader
-    const response = await axios.post('https://v3.fdownloader.net/api/ajaxSearch',
-      new URLSearchParams({
-        q: url,
-        lang: 'en',
-        web: 'fdownloader.net',
-        v: 'v2',
-        w: ''
-      }).toString(),
-      {
-        headers: {
-          'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          origin: 'https://fdownloader.net',
-          referer: 'https://fdownloader.net/',
-          'user-agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36'
-        }
-      }
-    );
-
-    // Vérifier la réponse
-    if (!response.data || !response.data.data) {
-      throw new Error('Impossible de récupérer les informations de la vidéo');
-    }
-
-    // Parser le HTML avec cheerio
-    const $ = cheerio.load(response.data.data);
-    
-    // Extraire la durée
-    const duration = $('.content p').first().text().trim() || 'Inconnue';
-    
-    // Extraire la miniature
-    const thumbnail = $('.thumbnail img').attr('src') || null;
-    
-    // Extraire toutes les qualités disponibles
-    const videos = [];
-    $('.download-link-fb').each((_, el) => {
-      const quality = $(el).attr('title')?.replace('Download ', '') || '';
-      const videoUrl = $(el).attr('href');
-      if (videoUrl) {
-        videos.push({ quality, url: videoUrl });
-      }
-    });
-
-    // Extraire aussi les liens normaux (parfois dans .download-button)
-    $('.download-button a').each((_, el) => {
-      const quality = $(el).text().trim() || 'SD';
-      const videoUrl = $(el).attr('href');
-      if (videoUrl && !videos.some(v => v.url === videoUrl)) {
-        videos.push({ quality, url: videoUrl });
-      }
-    });
-
-    if (videos.length === 0) {
-      throw new Error('Aucune vidéo trouvée pour ce lien');
-    }
-
-    // Sélectionner la meilleure qualité disponible (priorité: HD > 720p > 480p > première)
-    const qualityPriority = ['HD', '720p', '480p', '360p'];
-    let selectedVideo = videos[0];
-    
-    for (const priority of qualityPriority) {
-      const found = videos.find(v => 
-        v.quality.toLowerCase().includes(priority.toLowerCase())
-      );
-      if (found) {
-        selectedVideo = found;
-        break;
-      }
-    }
-
-    // Message d'information
-    const infoMessage = `📹 *Facebook Downloader*\n\n` +
-      `📊 *Qualité:* ${selectedVideo.quality}\n` +
-      `⏱️ *Durée:* ${duration}\n` +
-      `📦 *Taille:* (non disponible)\n\n` +
-      `🔗 *Lien:* ${url}\n\n` +
-      `📥 *Envoi de la vidéo en cours...*`;
-
-    await socket.sendMessage(sender, { text: infoMessage }, { quoted: msg });
-
-    try {
-      // Essayer d'envoyer la vidéo directement
-      await socket.sendMessage(jid, {
-        video: { url: selectedVideo.url },
-        caption: `📹 *Facebook Video*\n📊 Qualité: ${selectedVideo.quality}\n⏱️ Durée: ${duration}`,
-        mimetype: 'video/mp4'
-      }, { quoted: msg });
-      
-    } catch (sendErr) {
-      console.error('[FACEBOOK SEND ERROR]', sendErr);
-      
-      // Si l'envoi direct échoue, envoyer le lien
-      await socket.sendMessage(sender, {
-        text: `❌ Impossible d'envoyer la vidéo directement.\n\n🔗 *Lien de téléchargement:*\n${selectedVideo.url}\n\n📊 *Qualité:* ${selectedVideo.quality}`
-      }, { quoted: msg });
-    }
-
-    // Réaction de succès
-    await socket.sendMessage(jid, { react: { text: "✅", key: msg.key } });
-
-  } catch (e) {
-    console.error('[FACEBOOK ERROR]', e);
-    
-    // Définir jid et sender pour le bloc catch aussi
-    const jid = remoteJid || msg.key.remoteJid;
-    const sender = msg.key.participant || msg.key.remoteJid;
-    
-    let errorMessage = e.message;
-    if (e.response) {
-      errorMessage += ` (Status: ${e.response.status})`;
-    }
-    
-    await socket.sendMessage(sender, {
-      text: `❌ Erreur: ${errorMessage}\n\nEssayez un autre lien ou réessayez plus tard.`
-    }, { quoted: msg });
-    
-    await socket.sendMessage(jid, { react: { text: "❌", key: msg.key } });
-  }
-  break;
-}
-// case 'ig' : télécharger depuis reelsvideo.io et renvoyer média(s)
-case 'ig': {
-  try {
-    const sanitized = (number || '').replace(/[^0-9]/g, '');
-    const senderNum = (nowsender || '').split('@')[0];
-    // OWNER_NUMBER peut contenir plusieurs numéros séparés par des virgules
-    const ownerNums = String(config.OWNER_NUMBER || '').split(',').map(n => n.replace(/[^0-9]/g, '')).filter(Boolean);
-    // permission : seul le propriétaire de la session ou le bot owner peut utiliser
-    if (senderNum !== sanitized && !ownerNums.includes(senderNum)) {
-      return await socket.sendMessage(sender, { text: '❌ Permission denied. Only the session owner or bot owner can use this command.' }, { quoted: msg });
-    }
-
-    const url = (args[0] || '').trim();
-    if (!url || !/^https?:\/\//i.test(url)) {
-      return await socket.sendMessage(sender, { text: '❗ Usage: .ig <instagram_url>\nExample: .ig https://www.instagram.com/p/XXXXXXXXX/' }, { quoted: msg });
-    }
-
-    await socket.sendMessage(sender, { text: '🔎 Recherche et téléchargement en cours, merci de patienter...' }, { quoted: msg });
-
-    // appelle la fonction reelsvideo (assure-toi qu'elle est importée dans le fichier)
-    const info = await reelsvideo(url);
-
-    if (!info) {
-      return await socket.sendMessage(sender, { text: '❌ Impossible de récupérer les informations pour ce lien.' }, { quoted: msg });
-    }
-
-    // Préparer un résumé et l'envoyer d'abord
-    const summaryLines = [
-      `👤 Auteur: ${info.username || 'inconnu'}`,
-      `📸 Type: ${info.type || 'inconnu'}`,
-      `🖼️ Images: ${info.images?.length || 0}`,
-      `🎞️ Vidéos: ${info.videos?.length || 0}`,
-      `🎵 Audio: ${info.mp3?.length || 0}`
-    ];
-    if (info.thumb) summaryLines.unshift(`🔎 Aperçu: ${info.thumb}`);
-    await socket.sendMessage(sender, { text: `✅ Résultat:\n${summaryLines.join('\n')}` }, { quoted: msg });
-
-    // helper pour télécharger une URL en Buffer
-    async function fetchBufferFromUrl(u) {
-      try {
-        const r = await axios.get(u, { responseType: 'arraybuffer', timeout: 30_000 });
-        return Buffer.from(r.data);
-      } catch (e) {
-        console.error('[IG] fetchBufferFromUrl error', e?.message || e);
-        return null;
-      }
-    }
-
-    // envoyer les vidéos (priorité aux vidéos)
-    if (Array.isArray(info.videos) && info.videos.length) {
-      // si plusieurs vidéos, on envoie jusqu'à 3 pour éviter flood
-      const toSend = info.videos.slice(0, 3);
-      for (const v of toSend) {
-        try {
-          const buf = await fetchBufferFromUrl(v);
-          if (!buf) {
-            await socket.sendMessage(sender, { text: `⚠️ Impossible de télécharger la vidéo: ${v}` }, { quoted: msg });
-            continue;
-          }
-          await socket.sendMessage(sender, {
-            video: buf,
-            caption: ` KAIDO MD -- 🎥 Vidéo extraite de ${info.username || 'Instagram'}`,
-            mimetype: 'video/mp4'
-          }, { quoted: msg });
-        } catch (e) {
-          console.error('[IG] send video error', e);
-        }
-      }
-      return;
-    }
-
-    // sinon envoyer les images (carousel ou single)
-    if (Array.isArray(info.images) && info.images.length) {
-      const toSend = info.images.slice(0, 6); // limite raisonnable
-      for (const imgUrl of toSend) {
-        try {
-          const buf = await fetchBufferFromUrl(imgUrl);
-          if (!buf) {
-            await socket.sendMessage(sender, { text: `⚠️ Impossible de télécharger l'image: ${imgUrl}` }, { quoted: msg });
-            continue;
-          }
-          await socket.sendMessage(sender, {
-            image: buf,
-            caption: `🖼️ Image extraite de ${info.username || 'Instagram'}`
-          }, { quoted: msg });
-        } catch (e) {
-          console.error('[IG] send image error', e);
-        }
-      }
-      return;
-    }
-
-    // si audio disponible (mp3)
-    if (Array.isArray(info.mp3) && info.mp3.length) {
-      for (const a of info.mp3.slice(0, 2)) {
-        try {
-          const buf = await fetchBufferFromUrl(a.url);
-          if (!buf) {
-            await socket.sendMessage(sender, { text: `⚠️ Impossible de télécharger l'audio: ${a.url}` }, { quoted: msg });
-            continue;
-          }
-          await socket.sendMessage(sender, {
-            audio: buf,
-            mimetype: 'audio/mpeg',
-            fileName: `${a.id || 'audio'}.mp3`
-          }, { quoted: msg });
-        } catch (e) {
-          console.error('[IG] send audio error', e);
-        }
-      }
-      return;
-    }
-
-    // fallback : si aucune ressource trouvée
-    await socket.sendMessage(sender, { text: '❌ Aucun média exploitable trouvé pour ce lien.' }, { quoted: msg });
-
-  } catch (err) {
-    console.error('[IG COMMAND ERROR]', err);
-    try { await socket.sendMessage(sender, { react: { text: '❌', key: msg.key } }); } catch(e){}
-    await socket.sendMessage(sender, { text: `❌ Erreur lors du traitement: ${err.message || err}` }, { quoted: msg });
-  }
-  break;
-}
-
-
 case 'menu': {
   try {
     await socket.sendMessage(sender, { react: { text: "🐉", key: msg.key } });
@@ -8277,271 +7938,6 @@ ${footer}
 }
 
 
-// ================= CASE DANS TON BOT =================
-case 'swgc': {
-  try {
-    const crypto = require('crypto');
-    const { generateWAMessageContent, generateWAMessageFromContent, downloadContentFromMessage } = require('@rexxhayanasi/elaina-baileys');
-
-    async function groupStatus(client, jid, content) {
-      const inside = await generateWAMessageContent(content, {
-        upload: client.waUploadToServer
-      });
-      const messageSecret = crypto.randomBytes(32);
-      const m = generateWAMessageFromContent(
-        jid,
-        {
-          messageContextInfo: { messageSecret },
-          groupStatusMessageV2: {
-            message: { ...inside, messageContextInfo: { messageSecret } }
-          }
-        },
-        {}
-      );
-      await client.relayMessage(jid, m.message, { messageId: m.key.id });
-    }
-
-    function randomColor() {
-      return "#" + Math.floor(Math.random() * 16777215).toString(16).padStart(6, "0");
-    }
-
-    // Définir les variables nécessaires
-    const quoted = msg.message?.extendedTextMessage?.contextInfo?.quotedMessage;
-    const textInput = args.join(' ').trim();
-    const jid = msg.key.remoteJid;
-    const sender = msg.key.participant || msg.key.remoteJid;
-    const isGroup = jid.endsWith('@g.us');
-    const prefix = config.PREFIX || '.';
-    
-    // IMPORTANT: On ne répond que dans le groupe ou en privé selon le contexte
-    // Si c'est un groupe, on répond dans le groupe
-    // Si c'est un message privé, on répond en privé
-    const replyJid = isGroup ? jid : sender;
-
-    // Vérifier si on est dans un groupe
-    if (!isGroup) {
-      await socket.sendMessage(sender, { 
-        text: `╭─❏ *『 𝗦𝗧𝗔𝗧𝗨𝗧 𝗚𝗥𝗢𝗨𝗣𝗘 』* ❏─╮\n` +
-              `│ ✦ *Erreur* ❌\n` +
-              `│ ✦ Cette commande ne peut être utilisée\n` +
-              `│ ✦ que dans un groupe !\n` +
-              `╰─────────────────╯\n` +
-              `> © 𝐊𝐚𝐢𝐝𝐨-𝐌𝐃 ✨`
-      }, { quoted: msg });
-      break;
-    }
-
-    // Réaction d'attente dans le groupe
-    await socket.sendMessage(jid, { react: { text: "⏳", key: msg.key } });
-
-    // Si c'est une réponse à un message
-    if (msg.message?.extendedTextMessage?.contextInfo?.quotedMessage) {
-      const quotedMessage = msg.message.extendedTextMessage.contextInfo.quotedMessage;
-      
-      // Récupérer la caption originale du média cité
-      let originalCaption = "";
-      
-      if (quotedMessage.videoMessage && quotedMessage.videoMessage.caption) {
-        originalCaption = quotedMessage.videoMessage.caption;
-      } else if (quotedMessage.imageMessage && quotedMessage.imageMessage.caption) {
-        originalCaption = quotedMessage.imageMessage.caption;
-      }
-      
-      // Construire la nouvelle caption avec le watermark stylisé
-      let finalCaption = "";
-      const watermark = `\n\n━━━━━━━━━━━━━━\n✨ *𝗽𝗼𝘀𝘁𝗲𝗱 𝗯𝘆* ✨\n🐉 *𝐊𝐚𝐢𝐝𝐨-𝐌𝐃* 🐉`;
-      
-      if (originalCaption && textInput) {
-        finalCaption = `📝 *𝗖𝗮𝗽𝘁𝗶𝗼𝗻 𝗼𝗿𝗶𝗴𝗶𝗻𝗮𝗹𝗲* 📝\n❝ ${originalCaption} ❞\n\n💬 *𝗧𝗲𝘅𝘁𝗲 𝗮𝗷𝗼𝘂𝘁é* 💬\n❝ ${textInput} ❞${watermark}`;
-      } else if (originalCaption) {
-        finalCaption = `📝 *𝗖𝗮𝗽𝘁𝗶𝗼𝗻* 📝\n❝ ${originalCaption} ❞${watermark}`;
-      } else if (textInput) {
-        finalCaption = `💬 *𝗧𝗲𝘅𝘁𝗲* 💬\n❝ ${textInput} ❞${watermark}`;
-      } else {
-        finalCaption = `✨ *𝗦𝘁𝗮𝘁𝘂𝘁 𝗱𝗲 𝗴𝗿𝗼𝘂𝗽𝗲* ✨${watermark}`;
-      }
-      
-      // Traitement vidéo
-      if (quotedMessage.videoMessage) {
-        const videoMsg = quotedMessage.videoMessage;
-        
-        const stream = await downloadContentFromMessage(videoMsg, 'video');
-        const chunks = [];
-        for await (const chunk of stream) {
-          chunks.push(chunk);
-        }
-        const buffer = Buffer.concat(chunks);
-        
-        const payload = {
-          video: buffer,
-          caption: finalCaption,
-          mimetype: videoMsg.mimetype || 'video/mp4',
-          backgroundColor: randomColor()
-        };
-        
-        await groupStatus(socket, jid, payload);
-        
-        // Confirmation dans le groupe UNIQUEMENT
-        await socket.sendMessage(jid, { react: { text: "✅", key: msg.key } });
-        await socket.sendMessage(jid, { 
-          text: `╭─❏ *『 𝗦𝗧𝗔𝗧𝗨𝗧 𝗩𝗜𝗗𝗘𝗢 』* ❏─╮\n` +
-                `│ ✦ *𝗣𝘂𝗯𝗹𝗶é 𝗮𝘃𝗲𝗰 𝘀𝘂𝗰𝗰è𝘀* ✅\n` +
-                `│ ✦ 𝙿𝚊𝚛 : @${sender.split('@')[0]}\n` +
-                `╰─────────────────╯\n` +
-                `> © 𝐊𝐚𝐢𝐝𝐨-𝐌𝐃 🐉`,
-          mentions: [sender]
-        });
-      }
-      // Traitement image
-      else if (quotedMessage.imageMessage) {
-        const imgMsg = quotedMessage.imageMessage;
-        const stream = await downloadContentFromMessage(imgMsg, 'image');
-        const chunks = [];
-        for await (const chunk of stream) {
-          chunks.push(chunk);
-        }
-        const buffer = Buffer.concat(chunks);
-        
-        const payload = {
-          image: buffer,
-          caption: finalCaption,
-          backgroundColor: randomColor()
-        };
-        
-        await groupStatus(socket, jid, payload);
-        
-        await socket.sendMessage(jid, { react: { text: "✅", key: msg.key } });
-        await socket.sendMessage(jid, { 
-          text: `╭─❏ *『 𝗦𝗧𝗔𝗧𝗨𝗧 𝗜𝗠𝗔𝗚𝗘 』* ❏─╮\n` +
-                `│ ✦ *𝗣𝘂𝗯𝗹𝗶é 𝗮𝘃𝗲𝗰 𝘀𝘂𝗰𝗰è𝘀* ✅\n` +
-                `│ ✦ 𝙿𝚊𝚛 : @${sender.split('@')[0]}\n` +
-                `╰─────────────────╯\n` +
-                `> © 𝐊𝐚𝐢𝐝𝐨-𝐌𝐃 🐉`,
-          mentions: [sender]
-        });
-      }
-      // Traitement audio
-      else if (quotedMessage.audioMessage) {
-        const audioMsg = quotedMessage.audioMessage;
-        const stream = await downloadContentFromMessage(audioMsg, 'audio');
-        const chunks = [];
-        for await (const chunk of stream) {
-          chunks.push(chunk);
-        }
-        const buffer = Buffer.concat(chunks);
-        
-        const payload = {
-          audio: buffer,
-          mimetype: audioMsg.mimetype || 'audio/mp4',
-          backgroundColor: randomColor()
-        };
-        
-        await groupStatus(socket, jid, payload);
-        
-        // Envoyer le texte séparément si présent
-        if (finalCaption) {
-          await socket.sendMessage(jid, {
-            text: finalCaption
-          });
-        }
-        
-        await socket.sendMessage(jid, { react: { text: "✅", key: msg.key } });
-        await socket.sendMessage(jid, { 
-          text: `╭─❏ *『 𝗦𝗧𝗔𝗧𝗨𝗧 𝗔𝗨𝗗𝗜𝗢 』* ❏─╮\n` +
-                `│ ✦ *𝗣𝘂𝗯𝗹𝗶é 𝗮𝘃𝗲𝗰 𝘀𝘂𝗰𝗰è𝘀* ✅\n` +
-                `│ ✦ 𝙿𝚊𝚛 : @${sender.split('@')[0]}\n` +
-                `╰─────────────────╯\n` +
-                `> © 𝐊𝐚𝐢𝐝𝐨-𝐌𝐃 🐉`,
-          mentions: [sender]
-        });
-      }
-      // Message texte cité
-      else {
-        let quotedText = "";
-        if (quotedMessage.conversation) {
-          quotedText = quotedMessage.conversation;
-        } else if (quotedMessage.extendedTextMessage?.text) {
-          quotedText = quotedMessage.extendedTextMessage.text;
-        }
-        
-        const textToUse = textInput || quotedText;
-        
-        if (!textToUse) {
-          throw new Error("Aucun texte à publier");
-        }
-        
-        const finalText = `❝ ${textToUse} ❞${watermark}`;
-        
-        const payload = {
-          text: finalText,
-          backgroundColor: randomColor()
-        };
-        
-        await groupStatus(socket, jid, payload);
-        
-        await socket.sendMessage(jid, { react: { text: "✅", key: msg.key } });
-        await socket.sendMessage(jid, { 
-          text: `╭─❏ *『 𝗦𝗧𝗔𝗧𝗨𝗧 𝗧𝗘𝗫𝗧𝗘 』* ❏─╮\n` +
-                `│ ✦ *𝗣𝘂𝗯𝗹𝗶é 𝗮𝘃𝗲𝗰 𝘀𝘂𝗰𝗰è𝘀* ✅\n` +
-                `│ ✦ 𝙿𝚊𝚛 : @${sender.split('@')[0]}\n` +
-                `╰─────────────────╯\n` +
-                `> © 𝐊𝐚𝐢𝐝𝐨-𝐌𝐃 🐉`,
-          mentions: [sender]
-        });
-      }
-    } 
-    else if (textInput) {
-      // Message texte simple sans citation
-      const watermark = `\n\n━━━━━━━━━━━━━━\n✨ *𝗽𝗼𝘀𝘁𝗲𝗱 𝗯𝘆* ✨\n⚡ *𝐊𝐚𝐢𝐝𝐨-𝐌𝐃* 🐉`;
-      const finalText = `💬 *𝗠𝗲𝘀𝘀𝗮𝗴𝗲* 💬\n❝ ${textInput} ❞${watermark}`;
-      
-      const payload = {
-        text: finalText,
-        backgroundColor: randomColor()
-      };
-      
-      await groupStatus(socket, jid, payload);
-      
-      await socket.sendMessage(jid, { react: { text: "✅", key: msg.key } });
-      await socket.sendMessage(jid, { 
-        text: `╭─❏ *『 𝗦𝗧𝗔𝗧𝗨𝗧 𝗧𝗘𝗫𝗧𝗘 』* ❏─╮\n` +
-              `│ ✦ *𝗣𝘂𝗯𝗹𝗶é 𝗮𝘃𝗲𝗰 𝘀𝘂𝗰𝗰è𝘀* ✅\n` +
-              `│ ✦ 𝙿𝚊𝚛 : @${sender.split('@')[0]}\n` +
-              `╰─────────────────╯\n` +
-              `> © 𝐊𝐚𝐢𝐝𝐨-𝐌𝐃 🐉`,
-        mentions: [sender]
-      });
-    }
-    else {
-      await socket.sendMessage(jid, { 
-        text: `╭─❏ *『 𝗘𝗥𝗥𝗘𝗨𝗥 』* ❏─╮\n` +
-              `│ ✦ *𝗨𝘀𝗮𝗴𝗲 𝗶𝗻𝗰𝗼𝗿𝗿𝗲𝗰𝘁* ❌\n` +
-              `│ ✦ 𝙴𝚡𝚎𝚖𝚙𝚕𝚎 : ${prefix}${command} 𝚂𝚊𝚕𝚞𝚝\n` +
-              `│ ✦ 𝙾𝚞 𝚛é𝚙𝚘𝚗𝚍 𝚊̀ 𝚞𝚗 𝚖é𝚍𝚒𝚊\n` +
-              `╰─────────────────╯\n` +
-              `> © 𝐊𝐚𝐢𝐝𝐨-𝐌𝐃 🐉`
-      }, { quoted: msg });
-      await socket.sendMessage(jid, { react: { text: "❌", key: msg.key } });
-    }
-
-  } catch (e) {
-    console.error('[SWGC ERROR]:', e);
-    const jid = msg?.key?.remoteJid;
-    const sender = msg?.key?.participant || msg?.key?.remoteJid;
-    const isGroup = jid?.endsWith('@g.us');
-    const replyJid = isGroup ? jid : sender;
-    
-    await socket.sendMessage(replyJid, { react: { text: "❌", key: msg.key } });
-    await socket.sendMessage(replyJid, { 
-      text: `╭─❏ *『 𝗘𝗥𝗥𝗘𝗨𝗥 』* ❏─╮\n` +
-            `│ ✦ *𝗨𝗻𝗲 𝗲𝗿𝗿𝗲𝘂𝗿 𝗲𝘀𝘁 𝘀𝘂𝗿𝘃𝗲𝗻𝘂𝗲* ❌\n` +
-            `│ ✦ 𝙳é𝚝𝚊𝚒𝚕 : ${e.message}\n` +
-            `╰─────────────────╯\n` +
-            `> © 𝐊𝐚𝐢𝐝𝐨-𝐌𝐃 🐉`
-    });
-  }
-  break;
-}
 // ==================== DOWNLOAD MENU ====================
 
 
